@@ -14,6 +14,9 @@ torchvision = { version = ">=0.29.1", source = "pytorch-cu126" }
 torchaudio = { version = ">=2.11.0", source = "pytorch-cu126" }
 audio-separator = "^0.47.0"
 audioread = "^3.1.0"
+silero-vad = "^6.2.3"
+soundfile = "^0.14.0"
+onnxruntime = "^1.31.0"
 
 [tool.poetry]
 packages = [{include = "video_translator", from = "src"}]
