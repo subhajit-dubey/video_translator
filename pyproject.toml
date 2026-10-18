@@ -19,6 +19,8 @@ soundfile = "^0.14.0"
 onnxruntime = "^1.31.0"
 faster-whisper = "^1.2.1"
 av = "<18"
+transformers = "^5.20.1"
+sentencepiece = "^0.2.2"
 
 [tool.poetry]
 packages = [{include = "video_translator", from = "src"}]
