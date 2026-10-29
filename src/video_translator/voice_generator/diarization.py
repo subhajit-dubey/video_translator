@@ -65,6 +65,11 @@ class PyannoteSpeakerDiarizer:
         device: str = "cuda",
         auth_token: str | None = None,
         pipeline: Any | None = None,
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+        clustering_threshold: float | None = None,
+        min_cluster_size: int | None = None,
     ) -> None:
         if not model_name.strip():
             raise ValueError("model_name must not be empty.")
@@ -74,10 +79,54 @@ class PyannoteSpeakerDiarizer:
                 "device must be 'cpu', 'cuda', or 'cuda:<index>'."
             )
 
+        for name, count in (
+            ("num_speakers", num_speakers),
+            ("min_speakers", min_speakers),
+            ("max_speakers", max_speakers),
+            ("min_cluster_size", min_cluster_size),
+        ):
+            if count is not None and (
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or count <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer.")
+
+        if num_speakers is not None and (
+            min_speakers is not None or max_speakers is not None
+        ):
+            raise ValueError(
+                "num_speakers cannot be combined with min_speakers "
+                "or max_speakers."
+            )
+
+        if (
+            min_speakers is not None
+            and max_speakers is not None
+            and min_speakers > max_speakers
+        ):
+            raise ValueError(
+                "min_speakers cannot be greater than max_speakers."
+            )
+
+        if clustering_threshold is not None and (
+            not math.isfinite(clustering_threshold)
+            or not 0 <= clustering_threshold <= 2
+        ):
+            raise ValueError(
+                "clustering_threshold must be between 0 and 2."
+            )
+
         self.model_name = model_name
         self.device = device
         self.auth_token = auth_token
         self._pipeline = pipeline
+        self.num_speakers = num_speakers
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
+        self.clustering_threshold = clustering_threshold
+        self.min_cluster_size = min_cluster_size
+        self._clustering_parameters_applied = False
 
     @staticmethod
     def _validate_audio(path: Path) -> None:
@@ -183,11 +232,45 @@ class PyannoteSpeakerDiarizer:
 
             pipeline = self._load_pipeline()
 
+            speaker_options = {
+                key: value
+                for key, value in (
+                    ("num_speakers", self.num_speakers),
+                    ("min_speakers", self.min_speakers),
+                    ("max_speakers", self.max_speakers),
+                )
+                if value is not None
+            }
+            if (
+                self.clustering_threshold is not None
+                or self.min_cluster_size is not None
+            ) and not self._clustering_parameters_applied:
+                clustering_parameters: dict[str, float | int] = {}
+                if self.clustering_threshold is not None:
+                    clustering_parameters["threshold"] = (
+                        self.clustering_threshold
+                    )
+                if self.min_cluster_size is not None:
+                    clustering_parameters["min_cluster_size"] = (
+                        self.min_cluster_size
+                    )
+                try:
+                    pipeline.instantiate(
+                        {"clustering": clustering_parameters}
+                    )
+                except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                    raise DiarizationError(
+                        "Unable to apply agglomerative clustering "
+                        f"parameters: {clustering_parameters}."
+                    ) from exc
+                self._clustering_parameters_applied = True
+
             pipeline_output = pipeline(
                 {
                     "waveform": waveform,
                     "sample_rate": int(sample_rate),
-                }
+                },
+                **speaker_options,
             )
 
             turns: list[SpeakerTurn] = []
