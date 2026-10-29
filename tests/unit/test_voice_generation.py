@@ -1,5 +1,6 @@
 import ctypes
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -14,6 +15,7 @@ from video_translator.voice_generator import (
     F5TTSSynthesizer,
     InvalidAudioError,
     InvalidTranslationFileError,
+    PiperTTSSynthesizer,
     PyannoteSpeakerDiarizer,
     SpeakerTurn,
     VoiceGenerator,
@@ -49,7 +51,17 @@ class FakeAnnotation:
 
 
 class FakePipeline:
-    def __call__(self, audio_path):
+    def __init__(self):
+        self.call_kwargs = {}
+        self.instantiated_parameters = None
+
+    def instantiate(self, parameters):
+        self.instantiated_parameters = parameters
+        return self
+
+    def __call__(self, _audio_path, **kwargs):
+        assert _audio_path is not None
+        self.call_kwargs = kwargs
         return FakeAnnotation()
 
 
@@ -303,6 +315,70 @@ def test_diarize_returns_speaker_turns(
     ]
 
 
+def test_diarize_passes_requested_speaker_count(source_audio):
+    pipeline = FakePipeline()
+    diarizer = PyannoteSpeakerDiarizer(
+        device="cpu",
+        pipeline=pipeline,
+        num_speakers=2,
+    )
+
+    diarizer.diarize(source_audio)
+
+    assert pipeline.call_kwargs == {"num_speakers": 2}
+
+
+def test_diarizer_applies_agglomerative_clustering_threshold(source_audio):
+    pipeline = FakePipeline()
+    diarizer = PyannoteSpeakerDiarizer(
+        device="cpu",
+        pipeline=pipeline,
+        min_speakers=3,
+        max_speakers=6,
+        clustering_threshold=0.6,
+        min_cluster_size=6,
+    )
+
+    diarizer.diarize(source_audio)
+
+    assert pipeline.instantiated_parameters == {
+        "clustering": {
+            "threshold": 0.6,
+            "min_cluster_size": 6,
+        }
+    }
+    assert pipeline.call_kwargs == {
+        "min_speakers": 3,
+        "max_speakers": 6,
+    }
+
+
+def test_diarizer_rejects_conflicting_speaker_count_options():
+    with pytest.raises(ValueError, match="cannot be combined"):
+        PyannoteSpeakerDiarizer(
+            device="cpu",
+            num_speakers=2,
+            min_speakers=2,
+        )
+
+
+def test_diarizer_rejects_invalid_speaker_bounds():
+    with pytest.raises(ValueError, match="min_speakers"):
+        PyannoteSpeakerDiarizer(
+            device="cpu",
+            min_speakers=4,
+            max_speakers=2,
+        )
+
+
+def test_diarizer_rejects_invalid_clustering_threshold():
+    with pytest.raises(ValueError, match="between 0 and 2"):
+        PyannoteSpeakerDiarizer(
+            device="cpu",
+            clustering_threshold=2.1,
+        )
+
+
 def test_extract_profiles_creates_one_reference_per_speaker(
     fake_diarizer,
     source_audio,
@@ -322,6 +398,159 @@ def test_extract_profiles_creates_one_reference_per_speaker(
         assert profile.reference_wav.is_file()
         assert profile.reference_wav.stat().st_size > 0
         assert profile.duration_seconds > 0
+
+
+def test_piper_selects_voice_from_speaker_profile_pitch(tmp_path):
+    sample_rate = 16000
+    time = np.arange(sample_rate, dtype=np.float32) / sample_rate
+    profile_path = tmp_path / "speaker.wav"
+    sf.write(
+        str(profile_path),
+        0.2 * np.sin(2 * np.pi * 220 * time),
+        sample_rate,
+    )
+    synthesizer = PiperTTSSynthesizer(
+        model_dir=tmp_path,
+    )
+
+    assert synthesizer.select_voice(profile_path, "SPEAKER_00") == (
+        "hi_IN-priyamvada-medium"
+    )
+    assert synthesizer.speaker_voice_map == {
+        "SPEAKER_00": "hi_IN-priyamvada-medium"
+    }
+    assert synthesizer.speaker_pitch_map["SPEAKER_00"] >= 165
+
+
+def test_piper_synthesizer_adjusts_speed_for_target_duration(
+    tmp_path,
+    monkeypatch,
+):
+    sample_rate = 16000
+    time = np.arange(sample_rate, dtype=np.float32) / sample_rate
+    profile_path = tmp_path / "speaker.wav"
+    sf.write(
+        str(profile_path),
+        0.2 * np.sin(2 * np.pi * 110 * time),
+        sample_rate,
+    )
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    for voice_name in (
+        "hi_IN-pratham-medium",
+        "hi_IN-priyamvada-medium",
+    ):
+        (model_dir / f"{voice_name}.onnx").touch()
+        (model_dir / f"{voice_name}.onnx.json").touch()
+
+    class FakeVoice:
+        def synthesize_wav(self, text, wav_file, *, syn_config):
+            assert text == "नमस्ते"
+            duration = 2.0 * syn_config.length_scale
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(
+                b"\0\0" * int(sample_rate * duration)
+            )
+
+    class FakeSynthesisConfig:
+        def __init__(self, *, length_scale):
+            self.length_scale = length_scale
+
+    monkeypatch.setitem(
+        sys.modules,
+        "piper",
+        SimpleNamespace(SynthesisConfig=FakeSynthesisConfig),
+    )
+    def load_fake_voice(path):
+        assert path.suffix == ".onnx"
+        return FakeVoice()
+
+    synthesizer = PiperTTSSynthesizer(
+        model_dir=model_dir,
+        voice_loader=load_fake_voice,
+    )
+    output_path = tmp_path / "speech.wav"
+
+    result = synthesizer.synthesize(
+        text="नमस्ते",
+        speaker_wav=profile_path,
+        output_path=output_path,
+        speaker_id="SPEAKER_00",
+        target_duration_seconds=1.0,
+    )
+
+    assert result == output_path
+    assert synthesizer.speaker_voice_map["SPEAKER_00"] == (
+        "hi_IN-pratham-medium"
+    )
+    assert 0.67 <= sf.info(str(output_path)).duration <= 1.50
+
+
+def test_voice_generator_uses_piper_without_reference_transcriber(
+    source_audio,
+    translation_json,
+    tmp_path,
+    monkeypatch,
+):
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    for voice_name in (
+        "hi_IN-pratham-medium",
+        "hi_IN-priyamvada-medium",
+    ):
+        (model_dir / f"{voice_name}.onnx").touch()
+        (model_dir / f"{voice_name}.onnx.json").touch()
+
+    class FakeVoice:
+        def synthesize_wav(self, text, wav_file, *, syn_config):
+            assert text.strip()
+            assert syn_config.length_scale > 0
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(22050)
+            wav_file.writeframes(b"\0\0" * 17640)
+
+    class FakeSynthesisConfig:
+        def __init__(self, *, length_scale):
+            self.length_scale = length_scale
+
+    monkeypatch.setitem(
+        sys.modules,
+        "piper",
+        SimpleNamespace(SynthesisConfig=FakeSynthesisConfig),
+    )
+    def load_fake_voice(path):
+        assert path.suffix == ".onnx"
+        return FakeVoice()
+
+    synthesizer = PiperTTSSynthesizer(
+        model_dir=model_dir,
+        voice_loader=load_fake_voice,
+    )
+    diarizer = PyannoteSpeakerDiarizer(
+        device="cpu",
+        pipeline=FakePipeline(),
+    )
+    generator = VoiceGenerator(
+        diarizer=diarizer,
+        synthesizer=synthesizer,
+    )
+
+    result = generator.generate(
+        translation_json,
+        source_audio,
+        tmp_path / "piper_output",
+    )
+
+    assert len(result.segments) == 2
+    assert synthesizer.speaker_voice_map == {
+        "SPEAKER_00": "hi_IN-priyamvada-medium",
+        "SPEAKER_01": "hi_IN-priyamvada-medium",
+    }
+    assert all(segment.audio_path.is_file() for segment in result.segments)
+    assert result.manifest_path.is_file()
 
 
 def test_load_translation_json(translation_json):
@@ -392,6 +621,30 @@ def test_generate_creates_audio_for_each_speaker(
     assert manifest["alignment_pending"] is True
     assert len(manifest["speakers"]) == 2
     assert len(manifest["segments"]) == 2
+
+
+def test_generate_reuses_provided_diarization_turns(
+    voice_generator,
+    source_audio,
+    translation_json,
+    tmp_path,
+):
+    diarize = Mock(wraps=voice_generator.diarizer.diarize)
+    voice_generator.diarizer.diarize = diarize
+    turns = [
+        SpeakerTurn(0.0, 1.4, "SPEAKER_00"),
+        SpeakerTurn(1.5, 3.0, "SPEAKER_01"),
+    ]
+
+    result = voice_generator.generate(
+        translation_json,
+        source_audio,
+        tmp_path / "voice_output",
+        diarization_turns=turns,
+    )
+
+    diarize.assert_not_called()
+    assert set(result.speaker_profiles) == {"SPEAKER_00", "SPEAKER_01"}
 
 
 def test_generate_uses_matching_speaker_reference(
