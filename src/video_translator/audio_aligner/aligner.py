@@ -10,7 +10,7 @@ import numpy as np
 import pyrubberband as pyrb
 import soundfile as sf
 from scipy.signal import butter, resample_poly, sosfilt, sosfiltfilt
-from math import gcd
+
 
 
 class AudioAlignmentError(Exception):
@@ -152,7 +152,7 @@ class AudioAligner:
         if source_rate == target_rate:
             return np.asarray(audio, dtype=np.float32)
 
-        common = gcd(source_rate, target_rate)
+        common = math.gcd(source_rate, target_rate)
 
         try:
             result = resample_poly(
@@ -210,16 +210,16 @@ class AudioAligner:
                 "Calculated time-stretch rate is invalid."
             )
 
-        if not (
-            self.config.min_stretch_rate
-            <= rate
-            <= self.config.max_stretch_rate
-        ):
+        if rate < self.config.min_stretch_rate:
+            return self._fit_length(audio, target_samples), rate
+
+        if rate > self.config.max_stretch_rate:
             raise AudioAlignmentError(
                 f"Required stretch rate {rate:.3f} is outside the supported "
                 f"range [{self.config.min_stretch_rate:.3f}, "
                 f"{self.config.max_stretch_rate:.3f}]. "
-                "Adjust the generated segment or stretch-rate limits."
+                "Shorten or regenerate the segment, or adjust the "
+                "stretch-rate limits."
             )
 
         # [Rubber Band] A larger rate means faster playback and shorter audio.
@@ -391,10 +391,19 @@ class AudioAligner:
         *,
         output_filename: str = "aligned_dubbing.wav",
         manifest_filename: str = "audio_alignment_manifest.json",
+        max_duration_seconds: float | None = None,
     ) -> AudioAlignmentResult:
-        """Align VoiceGenerationResult segments to the source timeline."""
+        """Align generated speech, optionally capping output duration."""
         source_path = Path(source_audio_path)
         destination = Path(output_dir)
+
+        if max_duration_seconds is not None and (
+            not math.isfinite(max_duration_seconds)
+            or max_duration_seconds <= 0
+        ):
+            raise ValueError(
+                "max_duration_seconds must be positive and finite."
+            )
 
         destination.mkdir(parents=True, exist_ok=True)
 
@@ -421,6 +430,27 @@ class AudioAligner:
                     f"Invalid segment timestamps: "
                     f"{segment.start} - {segment.end}"
                 )
+            if (
+                max_duration_seconds is not None
+                and segment.end > max_duration_seconds
+            ):
+                raise AudioAlignmentError(
+                    f"Segment ends at {segment.end:.3f}s, beyond the "
+                    f"{max_duration_seconds:.3f}s maximum timeline."
+                )
+
+        max_timeline_samples = (
+            int(round(max_duration_seconds * self.config.sample_rate))
+            if max_duration_seconds is not None
+            else None
+        )
+        if max_timeline_samples is not None:
+            if max_timeline_samples < 1:
+                raise ValueError(
+                    "max_duration_seconds is shorter than one output sample."
+                )
+            source_audio = source_audio[:max_timeline_samples]
+            source_duration = len(source_audio) / sample_rate
 
         timeline_duration = max(
             [source_duration]
@@ -431,6 +461,8 @@ class AudioAligner:
             1,
             int(round(timeline_duration * sample_rate)),
         )
+        if max_timeline_samples is not None:
+            timeline_samples = min(timeline_samples, max_timeline_samples)
 
         timeline_mix = np.zeros(
             timeline_samples,
