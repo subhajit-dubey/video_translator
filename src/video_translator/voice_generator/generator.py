@@ -4,12 +4,15 @@ import ctypes
 import json
 import math
 import sys
+import tempfile
+import wave
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, Iterable
 
+import numpy as np
 import soundfile as sf
 
 from video_translator.voice_generator.diarization import (
@@ -28,6 +31,9 @@ DEFAULT_TTS_DEVICE = "cuda"
 DEFAULT_NUM_SPEAKER_PROFILE_SECONDS = 10.0
 DEFAULT_TTS_CKPT_FILE = ""
 DEFAULT_TTS_VOCAB_FILE = ""
+DEFAULT_PIPER_MALE_VOICE = "hi_IN-pratham-medium"
+DEFAULT_PIPER_FEMALE_VOICE = "hi_IN-priyamvada-medium"
+DEFAULT_PIPER_VOICE_PITCH_THRESHOLD_HZ = 165.0
 
 
 class VoiceGeneratorError(Exception):
@@ -323,6 +329,268 @@ class F5TTSSynthesizer:
         return destination
 
 
+class PiperTTSSynthesizer:
+    """Synthesize Hindi speech with Piper voices selected by speaker pitch."""
+
+    model_name = "Piper Hindi"
+    device = "cpu"
+    ckpt_file = ""
+    vocab_file = ""
+
+    def __init__(
+        self,
+        *,
+        model_dir: str | Path,
+        male_voice: str = DEFAULT_PIPER_MALE_VOICE,
+        female_voice: str = DEFAULT_PIPER_FEMALE_VOICE,
+        pitch_threshold_hz: float = DEFAULT_PIPER_VOICE_PITCH_THRESHOLD_HZ,
+        max_stretch_rate: float = 1.50,
+        voice_loader: Any | None = None,
+    ) -> None:
+        if not male_voice.strip() or not female_voice.strip():
+            raise ValueError("Piper voice names must not be empty.")
+
+        if (
+            not math.isfinite(pitch_threshold_hz)
+            or pitch_threshold_hz <= 0
+        ):
+            raise ValueError("pitch_threshold_hz must be positive and finite.")
+
+        if not math.isfinite(max_stretch_rate) or max_stretch_rate <= 0:
+            raise ValueError("Invalid Piper time-stretch rate limits.")
+
+        self.model_dir = Path(model_dir).expanduser()
+        self.male_voice = male_voice
+        self.female_voice = female_voice
+        self.pitch_threshold_hz = pitch_threshold_hz
+        self.max_stretch_rate = max_stretch_rate
+        self._voice_loader = voice_loader
+        self._voices: dict[str, Any] = {}
+        self._speaker_pitches: dict[Path, float] = {}
+        self.speaker_pitch_map: dict[str, float] = {}
+        self.speaker_voice_map: dict[str, str] = {}
+
+    @staticmethod
+    def estimate_fundamental_frequency(audio_path: str | Path) -> float:
+        """Estimate median voiced pitch from a speaker profile WAV."""
+        path = Path(audio_path)
+
+        try:
+            audio, sample_rate = sf.read(
+                str(path),
+                dtype="float32",
+                always_2d=True,
+            )
+        except Exception as exc:
+            raise VoiceSynthesisError(
+                f"Unable to read speaker profile for pitch analysis: {path}"
+            ) from exc
+
+        if audio.shape[0] == 0 or sample_rate <= 0:
+            raise VoiceSynthesisError(
+                f"Speaker profile has no audio samples: {path}"
+            )
+
+        mono = np.mean(audio, axis=1, dtype=np.float32)
+        if sample_rate != 16000:
+            from scipy.signal import resample_poly
+
+            divisor = math.gcd(int(sample_rate), 16000)
+            mono = resample_poly(
+                mono,
+                16000 // divisor,
+                int(sample_rate) // divisor,
+            ).astype(np.float32)
+            sample_rate = 16000
+
+        frame_size = int(sample_rate * 0.04)
+        hop_size = int(sample_rate * 0.02)
+        min_lag = max(1, int(sample_rate / 350))
+        max_lag = min(frame_size - 1, int(sample_rate / 70))
+        fft_size = 1 << (2 * frame_size - 1).bit_length()
+        window = np.hanning(frame_size).astype(np.float32)
+        pitches: list[float] = []
+        overall_rms = float(np.sqrt(np.mean(np.square(mono))))
+        rms_threshold = max(1e-4, overall_rms * 0.2)
+
+        for start in range(0, len(mono) - frame_size + 1, hop_size):
+            frame = mono[start : start + frame_size]
+            frame_rms = float(np.sqrt(np.mean(np.square(frame))))
+            if frame_rms < rms_threshold:
+                continue
+
+            centered = (frame - np.mean(frame)) * window
+            spectrum = np.fft.rfft(centered, n=fft_size)
+            autocorrelation = np.fft.irfft(
+                spectrum * np.conjugate(spectrum),
+                n=fft_size,
+            )[:frame_size]
+            if autocorrelation[0] <= 0:
+                continue
+
+            lag = min_lag + int(
+                np.argmax(autocorrelation[min_lag : max_lag + 1])
+            )
+            confidence = autocorrelation[lag] / autocorrelation[0]
+            if confidence >= 0.3:
+                pitches.append(sample_rate / lag)
+
+        if not pitches:
+            raise VoiceSynthesisError(
+                f"Unable to estimate voiced pitch from speaker profile: {path}"
+            )
+
+        return float(np.median(pitches))
+
+    def select_voice(
+        self,
+        speaker_wav: str | Path,
+        speaker_id: str,
+    ) -> str:
+        """Choose a Piper model from the speaker profile's median pitch."""
+        profile_path = Path(speaker_wav).resolve()
+        pitch = self._speaker_pitches.get(profile_path)
+        if pitch is None:
+            pitch = self.estimate_fundamental_frequency(profile_path)
+            self._speaker_pitches[profile_path] = pitch
+
+        self.speaker_pitch_map[speaker_id] = pitch
+        voice_name = (
+            self.female_voice
+            if pitch >= self.pitch_threshold_hz
+            else self.male_voice
+        )
+        self.speaker_voice_map[speaker_id] = voice_name
+        return voice_name
+
+    def _load_voice(self, voice_name: str) -> Any:
+        voice = self._voices.get(voice_name)
+        if voice is not None:
+            return voice
+
+        model_path = self.model_dir / f"{voice_name}.onnx"
+        config_path = model_path.with_suffix(".onnx.json")
+        if not model_path.is_file() or not config_path.is_file():
+            raise VoiceSynthesisError(
+                f"Piper voice model or config is missing: "
+                f"{model_path} and {config_path}"
+            )
+
+        if self._voice_loader is None:
+            try:
+                from piper import PiperVoice
+            except ImportError as exc:
+                raise VoiceGeneratorError(
+                    "Piper is not installed. Install it using: "
+                    "poetry install"
+                ) from exc
+
+            voice = PiperVoice.load(str(model_path), use_cuda=False)
+        else:
+            voice = self._voice_loader(model_path)
+
+        self._voices[voice_name] = voice
+        return voice
+
+    def _synthesize_once(
+        self,
+        voice: Any,
+        text: str,
+        output_path: Path,
+        length_scale: float,
+    ) -> None:
+        try:
+            from piper import SynthesisConfig
+        except ImportError as exc:
+            raise VoiceGeneratorError(
+                "Piper is not installed. Install it using: poetry install"
+            ) from exc
+
+        config = SynthesisConfig(length_scale=length_scale)
+        with wave.open(str(output_path), "wb") as wav_file:
+            voice.synthesize_wav(
+                text,
+                wav_file,
+                syn_config=config,
+            )
+
+    def synthesize(
+        self,
+        text: str,
+        speaker_wav: str | Path,
+        output_path: str | Path,
+        *,
+        speaker_id: str,
+        target_duration_seconds: float,
+    ) -> Path:
+        """Create a Hindi WAV, tuning Piper speed to its timeline interval."""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must not be empty.")
+
+        if (
+            not math.isfinite(target_duration_seconds)
+            or target_duration_seconds <= 0
+        ):
+            raise ValueError(
+                "target_duration_seconds must be positive and finite."
+            )
+
+        destination = Path(output_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        voice_name = self.select_voice(speaker_wav, speaker_id)
+        voice = self._load_voice(voice_name)
+        max_rate = self.max_stretch_rate * 0.98
+        length_scale = 1.0
+
+        with tempfile.TemporaryDirectory(
+            dir=destination.parent,
+            prefix=".piper-",
+        ) as temporary_dir:
+            generated_path = Path(temporary_dir) / "speech.wav"
+
+            for _ in range(3):
+                self._synthesize_once(
+                    voice,
+                    text.strip(),
+                    generated_path,
+                    length_scale,
+                )
+
+                try:
+                    generated_duration = float(
+                        sf.info(str(generated_path)).duration
+                    )
+                except Exception as exc:
+                    raise VoiceSynthesisError(
+                        f"Piper generated an invalid WAV file: {generated_path}"
+                    ) from exc
+
+                if (
+                    not math.isfinite(generated_duration)
+                    or generated_duration <= 0
+                ):
+                    raise VoiceSynthesisError(
+                        f"Piper generated an empty WAV file: {generated_path}"
+                    )
+
+                stretch_rate = (
+                    generated_duration / target_duration_seconds
+                )
+                if stretch_rate <= max_rate:
+                    generated_path.replace(destination)
+                    return destination
+
+                adjusted_scale = length_scale * max_rate / stretch_rate
+                length_scale = min(2.0, max(0.35, adjusted_scale))
+                generated_path.unlink(missing_ok=True)
+
+        raise VoiceSynthesisError(
+            f"Piper cannot fit speaker {speaker_id!r} speech into "
+            f"{target_duration_seconds:.2f}s without exceeding supported "
+            f"time-stretch limits."
+        )
+
+
 class VoiceGenerator:
     """Generate speaker-conditioned translated speech.
 
@@ -334,7 +602,7 @@ class VoiceGenerator:
         self,
         *,
         diarizer: PyannoteSpeakerDiarizer | None = None,
-        synthesizer: F5TTSSynthesizer | None = None,
+        synthesizer: F5TTSSynthesizer | PiperTTSSynthesizer | None = None,
         diarization_device: str = "cuda",
         tts_device: str = "cuda",
         auth_token: str | None = None,
@@ -582,6 +850,7 @@ class VoiceGenerator:
         output_dir: str | Path,
         *,
         reference_texts: dict[str, str] | None = None,
+        diarization_turns: Iterable[SpeakerTurn] | None = None,
     ) -> VoiceGenerationResult:
         """Create speaker profiles and synthesize each translated segment.
 
@@ -592,6 +861,8 @@ class VoiceGenerator:
             reference_texts: Optional source-language transcript per speaker,
                 keyed by diarization speaker ID. Missing entries are
                 automatically transcribed by F5-TTS.
+            diarization_turns: Optional precomputed speaker turns. When
+                supplied, these turns are used instead of running diarization.
         """
         translation_path = Path(translation_json_path)
         source_audio = Path(source_audio_path)
@@ -631,7 +902,11 @@ class VoiceGenerator:
         segments_dir = destination / "segments"
         segments_dir.mkdir(parents=True, exist_ok=True)
 
-        turns = self.diarizer.diarize(source_audio)
+        turns = (
+            list(diarization_turns)
+            if diarization_turns is not None
+            else self.diarizer.diarize(source_audio)
+        )
 
         profiles = self.diarizer.extract_profiles(
             source_audio,
@@ -657,24 +932,33 @@ class VoiceGenerator:
             profile = profiles[speaker_id]
             audio_path = segments_dir / f"segment_{index:04d}.wav"
 
-            reference_text = self._get_reference_text(
-                speaker_id=speaker_id,
-                profile=profile,
-                reference_texts=reference_texts,
-            )
+            if isinstance(self.synthesizer, PiperTTSSynthesizer):
+                self.synthesizer.synthesize(
+                    text=segment.text,
+                    speaker_wav=profile.reference_wav,
+                    output_path=audio_path,
+                    speaker_id=speaker_id,
+                    target_duration_seconds=segment.end - segment.start,
+                )
+            else:
+                reference_text = self._get_reference_text(
+                    speaker_id=speaker_id,
+                    profile=profile,
+                    reference_texts=reference_texts,
+                )
 
-            reference_text = (
-                reference_text.strip()
-                if isinstance(reference_text, str)
-                else ""
-            )
+                reference_text = (
+                    reference_text.strip()
+                    if isinstance(reference_text, str)
+                    else ""
+                )
 
-            self.synthesizer.synthesize(
-                text=segment.text,
-                speaker_wav=profile.reference_wav,
-                output_path=audio_path,
-                reference_text=reference_text,
-            )
+                self.synthesizer.synthesize(
+                    text=segment.text,
+                    speaker_wav=profile.reference_wav,
+                    output_path=audio_path,
+                    reference_text=reference_text,
+                )
 
             try:
                 audio_info = sf.info(str(audio_path))
@@ -717,6 +1001,11 @@ class VoiceGenerator:
             "tts_device": self.synthesizer.device,
             "tts_ckpt_file": self.synthesizer.ckpt_file,
             "tts_vocab_file": self.synthesizer.vocab_file,
+            "speaker_voice_map": getattr(
+                self.synthesizer,
+                "speaker_voice_map",
+                {},
+            ),
             "alignment_pending": True,
             "speakers": [
                 {
