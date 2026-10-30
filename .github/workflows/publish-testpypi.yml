@@ -1,0 +1,38 @@
+name: Publish to TestPyPI via Poetry
+
+on:
+  push:
+    tags: [ "v*" ]
+
+jobs:
+  deploy-testpypi:
+    name: Build & Push with Poetry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: latest
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Configure TestPyPI token repository
+        run: poetry config repository.testpypi https://test.pypi.org/legacy/
+
+      - name: Build package with Poetry
+        run: poetry build
+
+      - name: Publish package to TestPyPI
+        run: |
+          poetry config pypi-token.testpypi ${{ secrets.TEST_PYPI_API_TOKEN }}
+          poetry publish -r testpypi

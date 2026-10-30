@@ -1,0 +1,42 @@
+name: Code Quality CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint, Format & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: latest
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Install project dependencies
+        run: poetry install --with dev --no-interaction
+
+      - name: Check code formatting (Ruff)
+        run: poetry run ruff format --check .
+
+      - name: Run linter (Ruff)
+        run: poetry run ruff check .
+
+      - name: Run strict type checking (Mypy)
+        run: poetry run mypy .
