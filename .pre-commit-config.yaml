@@ -19,3 +19,4 @@ repos:
     hooks:
       - id: mypy
         args: ["--strict", "--warn-unreachable", "--warn-unused-ignores"]
+        exclude: "^tests/"

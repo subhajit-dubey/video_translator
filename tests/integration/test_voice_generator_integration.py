@@ -8,16 +8,12 @@ from dotenv import load_dotenv
 
 from video_translator.voice_generator import VoiceGenerator
 
-
 load_dotenv()
 
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_VOICE_GENERATOR_INTEGRATION") != "1",
-    reason=(
-        "Set RUN_VOICE_GENERATOR_INTEGRATION=1 "
-        "to run model integration tests."
-    ),
+    reason=("Set RUN_VOICE_GENERATOR_INTEGRATION=1 to run model integration tests."),
 )
 
 
@@ -31,8 +27,7 @@ def test_voice_generator_end_to_end(tmp_path: Path):
 
     if not source_audio_value or not translation_json_value:
         pytest.skip(
-            "Set VOICE_GENERATOR_SOURCE_AUDIO and "
-            "VOICE_GENERATOR_TRANSLATION_JSON."
+            "Set VOICE_GENERATOR_SOURCE_AUDIO and VOICE_GENERATOR_TRANSLATION_JSON.",
         )
 
     source_audio = Path(source_audio_value)
@@ -42,9 +37,7 @@ def test_voice_generator_end_to_end(tmp_path: Path):
         pytest.skip(f"Source audio is unavailable: {source_audio}")
 
     if not translation_json.is_file():
-        pytest.skip(
-            f"Translation JSON is unavailable: {translation_json}"
-        )
+        pytest.skip(f"Translation JSON is unavailable: {translation_json}")
 
     if not os.getenv("HF_TOKEN"):
         pytest.skip("HF_TOKEN is required for pyannote diarization.")
@@ -56,12 +49,10 @@ def test_voice_generator_end_to_end(tmp_path: Path):
     tts_ckpt_file = os.getenv("VOICE_GENERATOR_TTS_CKPT_FILE", "")
     tts_vocab_file = os.getenv("VOICE_GENERATOR_TTS_VOCAB_FILE", "")
 
-    if tts_model == "F5-Hindi-Small" and not (
-        tts_ckpt_file and tts_vocab_file
-    ):
+    if tts_model == "F5-Hindi-Small" and not (tts_ckpt_file and tts_vocab_file):
         pytest.skip(
             "VOICE_GENERATOR_TTS_CKPT_FILE and "
-            "VOICE_GENERATOR_TTS_VOCAB_FILE are required for Hindi TTS."
+            "VOICE_GENERATOR_TTS_VOCAB_FILE are required for Hindi TTS.",
         )
 
     with translation_json.open(encoding="utf-8") as handle:
@@ -70,9 +61,7 @@ def test_voice_generator_end_to_end(tmp_path: Path):
     if not translation.get("segments"):
         pytest.skip("The translation JSON contains no text segments.")
 
-    reference_texts_path = os.getenv(
-        "VOICE_GENERATOR_REFERENCE_TEXTS_JSON"
-    )
+    reference_texts_path = os.getenv("VOICE_GENERATOR_REFERENCE_TEXTS_JSON")
 
     reference_texts = None
 
@@ -101,9 +90,7 @@ def test_voice_generator_end_to_end(tmp_path: Path):
     assert result.speaker_profiles
     assert result.segments
 
-    manifest = json.loads(
-        result.manifest_path.read_text(encoding="utf-8")
-    )
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["alignment_pending"] is True
 

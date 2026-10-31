@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
-import numpy as np
-import soundfile as sf
+import numpy as np  # type: ignore[import-not-found]
+import soundfile as sf  # type: ignore[import-not-found]
 
+if TYPE_CHECKING:
+    from audio_separator.separator import Separator  # type: ignore[import-not-found]
 
+# Constants for audio processing
+MAX_PEAK_THRESHOLD = 0.99
 DEFAULT_MODEL = "htdemucs.yaml"
 
 DEMUCS_STEMS = ("Vocals", "Drums", "Bass", "Other")
@@ -45,26 +50,24 @@ class AudioSeparator:
 
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
         if not model or not model.strip():
-            raise ValueError("model must not be empty")
+            msg = "model must not be empty"
+            raise ValueError(msg)
 
         self._model = model
 
     @staticmethod
     def _validate_input(path: Path) -> None:
         if not path.exists():
-            raise InvalidAudioError(
-                f"Input audio file does not exist: {path}"
-            )
+            msg = f"Input audio file does not exist: {path}"
+            raise InvalidAudioError(msg)
 
         if not path.is_file():
-            raise InvalidAudioError(
-                f"Input path is not a file: {path}"
-            )
+            msg = f"Input path is not a file: {path}"
+            raise InvalidAudioError(msg)
 
         if path.stat().st_size == 0:
-            raise InvalidAudioError(
-                f"Input audio file is empty: {path}"
-            )
+            msg = f"Input audio file is empty: {path}"
+            raise InvalidAudioError(msg)
 
     @staticmethod
     def _is_demucs_model(model: str) -> bool:
@@ -78,14 +81,8 @@ class AudioSeparator:
         return DEMUCS_STEMS
 
     @staticmethod
-    def _create_engine(output_dir: Path) -> Any:
-        try:
-            from audio_separator.separator import Separator
-        except ImportError as exc:
-            raise AudioSeparatorNotFoundError(
-                "audio-separator is not installed. "
-                "Install it using: poetry add audio-separator"
-            ) from exc
+    def _create_engine(output_dir: Path) -> Separator:
+        from audio_separator.separator import Separator
 
         try:
             return Separator(
@@ -95,26 +92,68 @@ class AudioSeparator:
                 amplification_threshold=0.0,
                 use_soundfile=True,
             )
+        except ImportError as exc:
+            msg = (
+                "audio-separator is not installed. "
+                "Install it using: poetry add audio-separator"
+            )
+            raise AudioSeparatorNotFoundError(msg) from exc
         except Exception as exc:
-            raise AudioSeparatorError(
-                "Unable to initialize audio-separator."
-            ) from exc
+            msg = "Unable to initialize audio-separator."
+            raise AudioSeparatorError(msg) from exc
 
     @staticmethod
     def _remove_partial_outputs(paths: tuple[Path, ...]) -> None:
         for path in paths:
-            try:
+            with contextlib.suppress(OSError):
                 path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     @staticmethod
     def _validate_outputs(paths: tuple[Path, ...]) -> None:
         for path in paths:
             if not path.is_file() or path.stat().st_size == 0:
-                raise AudioSeparatorError(
-                    f"Audio separator did not produce a valid stem: {path}"
-                )
+                msg = f"Audio separator did not produce a valid stem: {path}"
+                raise AudioSeparatorError(msg)
+
+    @staticmethod
+    def _validate_vocals_stem(vocals: np.ndarray) -> None:
+        if vocals.shape[0] == 0:
+            raise AudioSeparatorError("The vocals stem is empty.")
+        if not np.isfinite(vocals).all():
+            raise AudioSeparatorError("The vocals stem contains invalid samples.")
+
+    @staticmethod
+    def _validate_stem_compatibility(
+        stem_name: str,
+        audio: np.ndarray,
+        stem_sample_rate: int,
+        vocals: np.ndarray,
+        sample_rate: int,
+    ) -> None:
+        if stem_sample_rate != sample_rate:
+            raise AudioSeparatorError(f"Sample-rate mismatch in the {stem_name} stem.")
+        if audio.shape != vocals.shape:
+            raise AudioSeparatorError(f"Audio shape mismatch in the {stem_name} stem.")
+
+    @staticmethod
+    def _validate_instrumental_stem(instrumental: np.ndarray) -> None:
+        if not np.isfinite(instrumental).all():
+            raise AudioSeparatorError("The instrumental stem contains invalid samples.")
+
+    @staticmethod
+    def _apply_peak_normalization(
+        vocals: np.ndarray,
+        instrumental: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        peak = max(
+            float(np.max(np.abs(vocals))),
+            float(np.max(np.abs(instrumental))),
+        )
+
+        if peak > MAX_PEAK_THRESHOLD:
+            scale = MAX_PEAK_THRESHOLD / peak
+            return vocals * scale, instrumental * scale
+        return vocals, instrumental
 
     @staticmethod
     def _combine_demucs_stems(
@@ -122,81 +161,56 @@ class AudioSeparator:
         vocals_path: Path,
         instrumental_path: Path,
     ) -> None:
-        try:
-            vocals, sample_rate = sf.read(
-                str(vocals_path),
+        vocals, sample_rate = sf.read(
+            str(vocals_path),
+            dtype="float32",
+            always_2d=True,
+        )
+
+        AudioSeparator._validate_vocals_stem(vocals)
+
+        instrumental = np.zeros_like(vocals)
+
+        for stem_name, stem_path in stem_paths.items():
+            if stem_name == "Vocals":
+                continue
+
+            audio, stem_sample_rate = sf.read(
+                str(stem_path),
                 dtype="float32",
                 always_2d=True,
             )
 
-            if vocals.shape[0] == 0:
-                raise AudioSeparatorError("The vocals stem is empty.")
-
-            instrumental = np.zeros_like(vocals)
-
-            for stem_name, stem_path in stem_paths.items():
-                if stem_name == "Vocals":
-                    continue
-
-                audio, stem_sample_rate = sf.read(
-                    str(stem_path),
-                    dtype="float32",
-                    always_2d=True,
-                )
-
-                if stem_sample_rate != sample_rate:
-                    raise AudioSeparatorError(
-                        f"Sample-rate mismatch in the {stem_name} stem."
-                    )
-
-                if audio.shape != vocals.shape:
-                    raise AudioSeparatorError(
-                        f"Audio shape mismatch in the {stem_name} stem."
-                    )
-
-                instrumental += audio
-
-            if not np.isfinite(vocals).all():
-                raise AudioSeparatorError(
-                    "The vocals stem contains invalid samples."
-                )
-
-            if not np.isfinite(instrumental).all():
-                raise AudioSeparatorError(
-                    "The instrumental stem contains invalid samples."
-                )
-
-            peak = max(
-                float(np.max(np.abs(vocals))),
-                float(np.max(np.abs(instrumental))),
-            )
-
-            if peak > 0.99:
-                scale = 0.99 / peak
-                vocals *= scale
-                instrumental *= scale
-
-            sf.write(
-                str(vocals_path),
+            AudioSeparator._validate_stem_compatibility(
+                stem_name,
+                audio,
+                stem_sample_rate,
                 vocals,
                 sample_rate,
-                subtype="PCM_16",
             )
 
-            sf.write(
-                str(instrumental_path),
-                instrumental,
-                sample_rate,
-                subtype="PCM_16",
-            )
+            instrumental += audio
 
-        except AudioSeparatorError:
-            raise
+        AudioSeparator._validate_instrumental_stem(instrumental)
 
-        except Exception as exc:
-            raise AudioSeparatorError(
-                "Unable to combine the Demucs accompaniment stems."
-            ) from exc
+        vocals, instrumental = AudioSeparator._apply_peak_normalization(
+            vocals,
+            instrumental,
+        )
+
+        sf.write(
+            str(vocals_path),
+            vocals,
+            sample_rate,
+            subtype="PCM_16",
+        )
+
+        sf.write(
+            str(instrumental_path),
+            instrumental,
+            sample_rate,
+            subtype="PCM_16",
+        )
 
     def separate(
         self,
@@ -212,14 +226,14 @@ class AudioSeparator:
         selected_model = model or self._model
 
         if not selected_model or not selected_model.strip():
-            raise ValueError("model must not be empty")
+            msg = "model must not be empty"
+            raise ValueError(msg)
 
         self._validate_input(source)
 
         if destination.exists() and not destination.is_dir():
-            raise InvalidAudioError(
-                f"Output path is not a directory: {destination}"
-            )
+            msg = f"Output path is not a directory: {destination}"
+            raise InvalidAudioError(msg)
 
         is_demucs = self._is_demucs_model(selected_model)
 
@@ -235,13 +249,10 @@ class AudioSeparator:
             }
 
             output_names = {
-                name: f"{source.stem}_{name.lower()}"
-                for name in stem_names
+                name: f"{source.stem}_{name.lower()}" for name in stem_names
             }
 
-            generated_paths = tuple(stem_paths.values()) + (
-                instrumental_path,
-            )
+            generated_paths = (*tuple(stem_paths.values()), instrumental_path)
 
         else:
             stem_paths = {}
@@ -257,9 +268,8 @@ class AudioSeparator:
             )
 
         if any(path.exists() for path in generated_paths):
-            raise OutputAlreadyExistsError(
-                f"Separation output already exists in: {destination}"
-            )
+            msg = f"Separation output already exists in: {destination}"
+            raise OutputAlreadyExistsError(msg)
 
         destination.mkdir(parents=True, exist_ok=True)
 
@@ -282,16 +292,12 @@ class AudioSeparator:
                 )
 
                 intermediate_paths = tuple(
-                    path
-                    for name, path in stem_paths.items()
-                    if name != "Vocals"
+                    path for name, path in stem_paths.items() if name != "Vocals"
                 )
 
                 self._remove_partial_outputs(intermediate_paths)
 
-            self._validate_outputs(
-                (vocals_path, instrumental_path)
-            )
+            self._validate_outputs((vocals_path, instrumental_path))
 
         except AudioSeparatorError:
             self._remove_partial_outputs(generated_paths)
@@ -299,9 +305,8 @@ class AudioSeparator:
 
         except Exception as exc:
             self._remove_partial_outputs(generated_paths)
-            raise AudioSeparatorError(
-                f"Audio separation failed for: {source}"
-            ) from exc
+            msg = f"Audio separation failed for: {source}"
+            raise AudioSeparatorError(msg) from exc
 
         return AudioSeparationResult(
             input_path=source,

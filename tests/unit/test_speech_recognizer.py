@@ -11,8 +11,8 @@ from video_translator.speech_recognizer import (
     InvalidAudioError,
     ModelLoadError,
     SpeechRecognizer,
-    TranscriptSegment,
     TranscriptionError,
+    TranscriptSegment,
 )
 
 
@@ -40,7 +40,7 @@ def fake_model() -> Mock:
                     end=3.5,
                     text=" How are you?",
                 ),
-            ]
+            ],
         ),
         SimpleNamespace(
             language="en",
@@ -171,10 +171,7 @@ def test_transcribe_with_explicit_language(
 ):
     recognizer.transcribe(audio_file, language="fr")
 
-    assert (
-        fake_model.transcribe.call_args.kwargs["language"]
-        == "fr"
-    )
+    assert fake_model.transcribe.call_args.kwargs["language"] == "fr"
 
 
 def test_transcribe_rejects_empty_language(
@@ -245,8 +242,8 @@ def test_transcribe_uses_last_segment_when_duration_missing(
                     start=1.0,
                     end=4.0,
                     text="Test",
-                )
-            ]
+                ),
+            ],
         ),
         SimpleNamespace(
             language="en",
@@ -265,9 +262,7 @@ def test_transcribe_wraps_model_failure(
     fake_model,
     audio_file,
 ):
-    fake_model.transcribe.side_effect = RuntimeError(
-        "Model inference failed"
-    )
+    fake_model.transcribe.side_effect = RuntimeError("Model inference failed")
 
     with pytest.raises(TranscriptionError, match="Transcription failed"):
         recognizer.transcribe(audio_file)
@@ -334,9 +329,7 @@ def test_model_load_error_is_wrapped(monkeypatch):
     import types
 
     fake_module = types.ModuleType("faster_whisper")
-    fake_module.WhisperModel = Mock(
-        side_effect=RuntimeError("Model loading failed")
-    )
+    fake_module.WhisperModel = Mock(side_effect=RuntimeError("Model loading failed"))
 
     monkeypatch.setitem(
         sys.modules,

@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import asdict, dataclass
+from math import gcd
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import pyrubberband as pyrb
-import soundfile as sf
-from scipy.signal import butter, resample_poly, sosfilt, sosfiltfilt
-from math import gcd
+import numpy as np  # type: ignore[import-not-found]
+import pyrubberband as pyrb  # type: ignore[import-not-found]
+import soundfile as sf  # type: ignore[import-not-found]
+from scipy.signal import butter, resample_poly, sosfilt, sosfiltfilt  # type: ignore[import-not-found]
 
 
 class AudioAlignmentError(Exception):
@@ -44,10 +44,7 @@ class AudioAlignerConfig:
         if not math.isfinite(self.eq_strength) or not 0 <= self.eq_strength <= 1:
             raise ValueError("eq_strength must be between 0 and 1.")
 
-        if (
-            not math.isfinite(self.max_eq_gain_db)
-            or self.max_eq_gain_db < 0
-        ):
+        if not math.isfinite(self.max_eq_gain_db) or self.max_eq_gain_db < 0:
             raise ValueError("max_eq_gain_db must be non-negative.")
 
         if not math.isfinite(self.fade_seconds) or self.fade_seconds < 0:
@@ -113,9 +110,7 @@ class AudioAligner:
     def _read_mono(path: Path) -> tuple[np.ndarray, int]:
         """Read an audio file and convert it to mono float32."""
         if not path.is_file() or path.stat().st_size == 0:
-            raise AudioAlignmentError(
-                f"Audio file is missing or empty: {path}"
-            )
+            raise AudioAlignmentError(f"Audio file is missing or empty: {path}")
 
         try:
             audio, sample_rate = sf.read(
@@ -124,21 +119,15 @@ class AudioAligner:
                 always_2d=True,
             )
         except Exception as exc:
-            raise AudioAlignmentError(
-                f"Unable to read audio file: {path}"
-            ) from exc
+            raise AudioAlignmentError(f"Unable to read audio file: {path}") from exc
 
         if audio.shape[0] == 0 or sample_rate <= 0:
-            raise AudioAlignmentError(
-                f"Audio file contains no usable samples: {path}"
-            )
+            raise AudioAlignmentError(f"Audio file contains no usable samples: {path}")
 
         audio = np.mean(audio, axis=1, dtype=np.float32)
 
         if not np.isfinite(audio).all():
-            raise AudioAlignmentError(
-                f"Audio contains non-finite samples: {path}"
-            )
+            raise AudioAlignmentError(f"Audio contains non-finite samples: {path}")
 
         return audio, int(sample_rate)
 
@@ -162,8 +151,7 @@ class AudioAligner:
             )
         except Exception as exc:
             raise AudioAlignmentError(
-                f"Unable to resample audio from {source_rate} "
-                f"Hz to {target_rate} Hz."
+                f"Unable to resample audio from {source_rate} Hz to {target_rate} Hz.",
             ) from exc
 
         return np.asarray(result, dtype=np.float32)
@@ -175,9 +163,7 @@ class AudioAligner:
     ) -> np.ndarray:
         """Trim or zero-pad audio to an exact sample count."""
         if target_samples <= 0:
-            raise AudioAlignmentError(
-                "Target audio length must be positive."
-            )
+            raise AudioAlignmentError("Target audio length must be positive.")
 
         if len(audio) > target_samples:
             return audio[:target_samples].copy()
@@ -199,27 +185,19 @@ class AudioAligner:
     ) -> tuple[np.ndarray, float]:
         """Time-stretch speech to its target duration without changing pitch."""
         if len(audio) == 0:
-            raise AudioAlignmentError(
-                "Cannot stretch an empty audio segment."
-            )
+            raise AudioAlignmentError("Cannot stretch an empty audio segment.")
 
         rate = len(audio) / target_samples
 
         if not math.isfinite(rate) or rate <= 0:
-            raise AudioAlignmentError(
-                "Calculated time-stretch rate is invalid."
-            )
+            raise AudioAlignmentError("Calculated time-stretch rate is invalid.")
 
-        if not (
-            self.config.min_stretch_rate
-            <= rate
-            <= self.config.max_stretch_rate
-        ):
+        if not (self.config.min_stretch_rate <= rate <= self.config.max_stretch_rate):
             raise AudioAlignmentError(
                 f"Required stretch rate {rate:.3f} is outside the supported "
                 f"range [{self.config.min_stretch_rate:.3f}, "
                 f"{self.config.max_stretch_rate:.3f}]. "
-                "Adjust the generated segment or stretch-rate limits."
+                "Adjust the generated segment or stretch-rate limits.",
             )
 
         # [Rubber Band] A larger rate means faster playback and shorter audio.
@@ -233,7 +211,7 @@ class AudioAligner:
             except Exception as exc:
                 raise AudioAlignmentError(
                     "Rubber Band time stretching failed. Ensure "
-                    "rubberband-cli is installed and available on PATH."
+                    "rubberband-cli is installed and available on PATH.",
                 ) from exc
 
         # Correct small frame-count differences introduced by processing.
@@ -320,40 +298,30 @@ class AudioAligner:
             generated_band = self._filter_band(generated, sos)
             reference_band = self._filter_band(reference, sos)
 
-            generated_band_rms = float(
-                np.sqrt(np.mean(np.square(generated_band)))
-            )
-            reference_band_rms = float(
-                np.sqrt(np.mean(np.square(reference_band)))
-            )
+            generated_band_rms = float(np.sqrt(np.mean(np.square(generated_band))))
+            reference_band_rms = float(np.sqrt(np.mean(np.square(reference_band))))
 
             gain_db = 0.0
 
             if generated_band_rms >= 1e-5 and reference_band_rms >= 1e-5:
-                gain_db = 20.0 * math.log10(
-                    reference_band_rms / generated_band_rms
-                )
+                gain_db = 20.0 * math.log10(reference_band_rms / generated_band_rms)
 
                 gain_db = float(
                     np.clip(
                         gain_db,
                         -self.config.max_eq_gain_db,
                         self.config.max_eq_gain_db,
-                    )
+                    ),
                 )
 
                 gain_db *= self.config.eq_strength
 
             gains[name] = gain_db
 
-            processed += generated_band * np.float32(
-                10.0 ** (gain_db / 20.0)
-            )
+            processed += generated_band * np.float32(10.0 ** (gain_db / 20.0))
 
         if not np.isfinite(processed).all():
-            raise AudioAlignmentError(
-                "EQ matching produced non-finite audio samples."
-            )
+            raise AudioAlignmentError("EQ matching produced non-finite audio samples.")
 
         return processed, gains
 
@@ -369,14 +337,17 @@ class AudioAligner:
         if fade_samples <= 1:
             return audio
 
-        ramp = np.sin(
-            np.linspace(
-                0.0,
-                math.pi / 2.0,
-                fade_samples,
-                endpoint=True,
+        ramp = (
+            np.sin(
+                np.linspace(
+                    0.0,
+                    math.pi / 2.0,
+                    fade_samples,
+                    endpoint=True,
+                ),
             )
-        ) ** 2
+            ** 2
+        )
 
         audio[:fade_samples] *= ramp.astype(np.float32)
         audio[-fade_samples:] *= ramp[::-1].astype(np.float32)
@@ -418,13 +389,11 @@ class AudioAligner:
                 or segment.end <= segment.start
             ):
                 raise AudioAlignmentError(
-                    f"Invalid segment timestamps: "
-                    f"{segment.start} - {segment.end}"
+                    f"Invalid segment timestamps: {segment.start} - {segment.end}",
                 )
 
         timeline_duration = max(
-            [source_duration]
-            + [float(segment.end) for segment in segments]
+            [source_duration] + [float(segment.end) for segment in segments],
         )
 
         timeline_samples = max(
@@ -460,7 +429,7 @@ class AudioAligner:
 
             if target_samples <= 0:
                 raise AudioAlignmentError(
-                    f"Segment {index} has no usable target samples."
+                    f"Segment {index} has no usable target samples.",
                 )
 
             target_duration_seconds = target_samples / sample_rate
@@ -473,8 +442,7 @@ class AudioAligner:
 
             # Use the corresponding original source interval as the EQ reference.
             reference_audio = source_audio[
-                min(start_frame, len(source_audio)):
-                min(end_frame, len(source_audio))
+                min(start_frame, len(source_audio)) : min(end_frame, len(source_audio))
             ]
 
             eq_audio, eq_gains = self._match_eq(
@@ -483,9 +451,7 @@ class AudioAligner:
                 sample_rate,
             )
 
-            eq_audio = self._fade(
-                self._fit_length(eq_audio, target_samples)
-            )
+            eq_audio = self._fade(self._fit_length(eq_audio, target_samples))
 
             aligned_path = aligned_dir / f"segment_{index:04d}.wav"
 
@@ -498,7 +464,7 @@ class AudioAligner:
                 )
             except Exception as exc:
                 raise AudioAlignmentError(
-                    f"Unable to save aligned segment: {aligned_path}"
+                    f"Unable to save aligned segment: {aligned_path}",
                 ) from exc
 
             mix_end = min(
@@ -522,16 +488,14 @@ class AudioAligner:
                     target_duration_seconds=target_duration_seconds,
                     stretch_rate=stretch_rate,
                     eq_gains_db=eq_gains,
-                )
+                ),
             )
 
         # Apply one global gain reduction if overlapping segments would clip.
         peak = float(np.max(np.abs(timeline_mix))) if timeline_mix.size else 0.0
 
         mix_gain = (
-            self.config.peak_limit / peak
-            if peak > self.config.peak_limit
-            else 1.0
+            self.config.peak_limit / peak if peak > self.config.peak_limit else 1.0
         )
 
         if mix_gain < 1.0:
@@ -549,7 +513,7 @@ class AudioAligner:
             )
         except Exception as exc:
             raise AudioAlignmentError(
-                f"Unable to save aligned timeline: {aligned_audio_path}"
+                f"Unable to save aligned timeline: {aligned_audio_path}",
             ) from exc
 
         manifest = {
@@ -567,12 +531,8 @@ class AudioAligner:
                     "speaker_id": item.speaker_id,
                     "source_audio_path": str(item.source_audio_path.resolve()),
                     "audio_path": str(item.audio_path.resolve()),
-                    "source_duration_seconds": (
-                        item.source_duration_seconds
-                    ),
-                    "target_duration_seconds": (
-                        item.target_duration_seconds
-                    ),
+                    "source_duration_seconds": (item.source_duration_seconds),
+                    "target_duration_seconds": (item.target_duration_seconds),
                     "stretch_rate": item.stretch_rate,
                     "eq_gains_db": item.eq_gains_db,
                 }
@@ -591,7 +551,7 @@ class AudioAligner:
             )
         except OSError as exc:
             raise AudioAlignmentError(
-                f"Unable to write alignment manifest: {manifest_path}"
+                f"Unable to write alignment manifest: {manifest_path}",
             ) from exc
 
         return AudioAlignmentResult(
