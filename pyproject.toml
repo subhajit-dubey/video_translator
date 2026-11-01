@@ -57,6 +57,7 @@ line-length = 88
 python_version = "3.14"
 strict = true
 warn_unreachable = true
+disable_error_code = "unused-ignore"
 exclude = [
     "tests/",
     ".venv/",

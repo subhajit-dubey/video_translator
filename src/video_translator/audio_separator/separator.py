@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np  # type: ignore[import-not-found]
-import soundfile as sf  # type: ignore[import-not-found]
+import numpy as np  # type: ignore[import-untyped]
+import soundfile as sf  # type: ignore[import-untyped]
 
 if TYPE_CHECKING:
-    from audio_separator.separator import Separator  # type: ignore[import-not-found]
+    from audio_separator.separator import Separator  # type: ignore[import-untyped]
 
 # Constants for audio processing
 MAX_PEAK_THRESHOLD = 0.99

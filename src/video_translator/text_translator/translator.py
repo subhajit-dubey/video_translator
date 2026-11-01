@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    pass
+    from video_translator.text_translator.segments import (
+        TranslatedTextSegment,
+        TranslationResult,
+    )
 
 from video_translator.text_translator.segments import (
     TranslatedTextSegment,

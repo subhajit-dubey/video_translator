@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np  # type: ignore[import-not-found]
-import soundfile as sf  # type: ignore[import-not-found]
+import numpy as np  # type: ignore[import-untyped]
+import soundfile as sf  # type: ignore[import-untyped]
 
 DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
 DEFAULT_MAX_PROFILE_DURATION_SECONDS = 20.0
@@ -104,8 +104,8 @@ class PyannoteSpeakerDiarizer:
             )
 
         try:
-            import torch  # type: ignore[import-not-found]
-            from pyannote.audio import Pipeline  # type: ignore[import-not-found]
+            import torch  # type: ignore[import-untyped]
+            from pyannote.audio import Pipeline  # type: ignore[import-untyped]
         except ImportError as exc:
             raise PyannoteNotFoundError(
                 "Install pyannote.audio to enable diarization.",

@@ -14,9 +14,13 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.15.0
+  - repo: local
     hooks:
       - id: mypy
+        name: mypy
+        entry: poetry run mypy
+        language: system
+        types: [python]
         args: ["--strict", "--warn-unreachable", "--warn-unused-ignores"]
         exclude: "^tests/"
+        require_serial: true

@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from faster_whisper import WhisperModel  # type: ignore[import-not-found]
-from faster_whisper.transcribe import TranscriptionSegment  # type: ignore[import-not-found]
+from faster_whisper import WhisperModel  # type: ignore[import-untyped]
+from faster_whisper.transcribe import TranscriptionSegment  # type: ignore[import-untyped]
 
 DEFAULT_MODEL_SIZE = "small"
 DEFAULT_DEVICE = "auto"

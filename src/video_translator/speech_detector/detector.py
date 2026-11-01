@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np  # type: ignore[import-not-found]
-import soundfile as sf  # type: ignore[import-not-found]
-from scipy.signal import resample_poly  # type: ignore[import-not-found]
+import numpy as np  # type: ignore[import-not-found,import-untyped]
+import soundfile as sf  # type: ignore[import-not-found,import-untyped]
+from scipy.signal import resample_poly  # type: ignore[import-not-found,import-untyped]
 
 DEFAULT_SAMPLE_RATE = 16_000
 DEFAULT_THRESHOLD = 0.5
@@ -152,7 +151,7 @@ class SpeechDetector:
             return self._model
 
         try:
-            from silero_vad import load_silero_vad  # type: ignore[import-not-found]
+            from silero_vad import load_silero_vad  # type: ignore[import-untyped]
         except ImportError as exc:
             msg = (
                 "Silero VAD is not installed. "
@@ -173,7 +172,7 @@ class SpeechDetector:
         audio: np.ndarray,
     ) -> list[dict[str, Any]]:
         """Run Silero VAD and return speech timestamps in seconds."""
-        import torch  # type: ignore[import-not-found]
+        import torch  # type: ignore[import-untyped]
         from silero_vad import get_speech_timestamps
 
         model = self._load_model()

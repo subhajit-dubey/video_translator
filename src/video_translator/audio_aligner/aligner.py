@@ -7,10 +7,10 @@ from math import gcd
 from pathlib import Path
 from typing import Any
 
-import numpy as np  # type: ignore[import-not-found]
-import pyrubberband as pyrb  # type: ignore[import-not-found]
-import soundfile as sf  # type: ignore[import-not-found]
-from scipy.signal import butter, resample_poly, sosfilt, sosfiltfilt  # type: ignore[import-not-found]
+import numpy as np  # type: ignore[import-untyped]
+import pyrubberband as pyrb  # type: ignore[import-untyped]
+import soundfile as sf  # type: ignore[import-untyped]
+from scipy.signal import butter, resample_poly, sosfilt, sosfiltfilt  # type: ignore[import-untyped]
 
 
 class AudioAlignmentError(Exception):
@@ -229,7 +229,7 @@ class AudioAligner:
     ) -> np.ndarray:
         """Apply a zero-phase filter, with a fallback for short recordings."""
         if len(audio) < 64:
-            return sosfilt(sos, audio).astype(np.float32)
+            return np.asarray(sosfilt(sos, audio), dtype=np.float32)
 
         try:
             filtered = sosfiltfilt(sos, audio)
@@ -330,7 +330,7 @@ class AudioAligner:
         audio = np.asarray(audio, dtype=np.float32).copy()
 
         fade_samples = min(
-            int(round(self.config.fade_seconds * self.config.sample_rate)),
+            round(self.config.fade_seconds * self.config.sample_rate),
             len(audio) // 2,
         )
 
@@ -398,7 +398,7 @@ class AudioAligner:
 
         timeline_samples = max(
             1,
-            int(round(timeline_duration * sample_rate)),
+            round(timeline_duration * sample_rate),
         )
 
         timeline_mix = np.zeros(
@@ -423,8 +423,8 @@ class AudioAligner:
 
             source_duration_seconds = len(generated_audio) / sample_rate
 
-            start_frame = int(round(float(segment.start) * sample_rate))
-            end_frame = int(round(float(segment.end) * sample_rate))
+            start_frame = round(float(segment.start) * sample_rate)
+            end_frame = round(float(segment.end) * sample_rate)
             target_samples = end_frame - start_frame
 
             if target_samples <= 0:

@@ -4,13 +4,14 @@ import ctypes
 import json
 import math
 import sys
+from collections.abc import Generator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
-from typing import Any, Generator
+from typing import Any
 
-import soundfile as sf  # type: ignore[import-not-found]
+import soundfile as sf  # type: ignore[import-untyped]
 
 from video_translator.voice_generator.diarization import (
     InvalidAudioError,
@@ -85,7 +86,7 @@ def _preserve_hindi_text(text_list: list[str]) -> list[str]:
 @contextmanager
 def _hindi_text_normalization() -> Generator[None, None, None]:
     """Disable F5-TTS's Chinese-only Pinyin conversion for Hindi text."""
-    from f5_tts.infer import utils_infer  # type: ignore[import-not-found]
+    from f5_tts.infer import utils_infer  # type: ignore[import-untyped]
 
     with _HINDI_TEXT_NORMALIZATION_LOCK:
         original_converter = utils_infer.convert_char_to_pinyin
@@ -171,7 +172,7 @@ class F5TTSSynthesizer:
             return self._tts
 
         try:
-            import torch  # type: ignore[import-not-found]
+            import torch  # type: ignore[import-untyped]
         except ImportError as exc:
             raise F5TTSNotFoundError(
                 "F5-TTS is not installed. Install it using: poetry add f5-tts",
@@ -180,7 +181,7 @@ class F5TTSSynthesizer:
         _preload_cuda_nvrtc(torch)
 
         try:
-            from f5_tts.api import F5TTS  # type: ignore[import-not-found]
+            from f5_tts.api import F5TTS  # type: ignore[import-untyped]
         except ImportError as exc:
             raise F5TTSNotFoundError(
                 "F5-TTS is not installed. Install it using: poetry add f5-tts",
