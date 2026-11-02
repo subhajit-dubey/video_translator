@@ -9,7 +9,6 @@ from video_translator.text_translator import (
     TextTranslator,
 )
 
-
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_NLLB_INTEGRATION") != "1",
     reason="Set RUN_NLLB_INTEGRATION=1 to download/load NLLB-200 1.3B.",

@@ -95,7 +95,7 @@ def test_get_info_without_video_stream(
         return_value={
             "streams": [{"codec_type": "audio"}],
             "format": {"duration": "10.0"},
-        }
+        },
     )
 
     with pytest.raises(InvalidMediaError, match="No video stream"):
@@ -126,7 +126,7 @@ def test_ffprobe_failure_raises_invalid_media_error(
                 returncode=1,
                 cmd=["ffprobe"],
                 stderr="Invalid data found",
-            )
+            ),
         ),
     )
 
@@ -172,7 +172,7 @@ def test_extract_audio_without_audio_raises_error(
             height=1080,
             frame_rate=30.0,
             has_audio=False,
-        )
+        ),
     )
 
     with pytest.raises(NoAudioStreamError):
@@ -230,7 +230,7 @@ def test_extract_audio_does_not_overwrite(
             height=1080,
             frame_rate=30.0,
             has_audio=True,
-        )
+        ),
     )
 
     with pytest.raises(InvalidMediaError, match="already exists"):
@@ -255,7 +255,7 @@ def test_extract_audio_success(
             height=1080,
             frame_rate=30.0,
             has_audio=True,
-        )
+        ),
     )
 
     def fake_run(command, **kwargs):
@@ -319,7 +319,7 @@ def test_extract_audio_failure_removes_partial_output(
             height=1080,
             frame_rate=30.0,
             has_audio=True,
-        )
+        ),
     )
 
     def failing_run(command, **kwargs):
@@ -357,7 +357,7 @@ def test_extract_audio_fails_when_output_is_not_created(
             height=1080,
             frame_rate=30.0,
             has_audio=True,
-        )
+        ),
     )
 
     monkeypatch.setattr(
@@ -368,7 +368,7 @@ def test_extract_audio_fails_when_output_is_not_created(
                 returncode=0,
                 stdout="",
                 stderr="",
-            )
+            ),
         ),
     )
 

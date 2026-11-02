@@ -4,13 +4,14 @@ import ctypes
 import json
 import math
 import sys
+from collections.abc import Generator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 from typing import Any
 
-import soundfile as sf
+import soundfile as sf  # type: ignore[import-untyped]
 
 from video_translator.voice_generator.diarization import (
     InvalidAudioError,
@@ -18,7 +19,6 @@ from video_translator.voice_generator.diarization import (
     SpeakerProfile,
     SpeakerTurn,
 )
-
 
 DEFAULT_TTS_MODEL = "F5TTS_v1_Base"
 DEFAULT_HINDI_TTS_MODEL = "F5-Hindi-Small"
@@ -62,24 +62,20 @@ def _preload_cuda_nvrtc(torch_module: Any) -> None:
     cuda_major = torch_module.version.cuda.split(".", maxsplit=1)[0]
     site_packages = Path(torch_module.__file__).resolve().parent.parent
     nvrtc_path = (
-        site_packages
-        / "nvidia"
-        / "cuda_nvrtc"
-        / "lib"
-        / f"libnvrtc.so.{cuda_major}"
+        site_packages / "nvidia" / "cuda_nvrtc" / "lib" / f"libnvrtc.so.{cuda_major}"
     )
 
     if not nvrtc_path.is_file():
         raise VoiceGeneratorError(
             f"CUDA NVRTC runtime library for CUDA {cuda_major} "
-            f"was not found: {nvrtc_path}"
+            f"was not found: {nvrtc_path}",
         )
 
     try:
         ctypes.CDLL(str(nvrtc_path), mode=ctypes.RTLD_GLOBAL)
     except OSError as exc:
         raise VoiceGeneratorError(
-            f"Unable to load CUDA NVRTC runtime library: {nvrtc_path}"
+            f"Unable to load CUDA NVRTC runtime library: {nvrtc_path}",
         ) from exc
 
 
@@ -88,9 +84,9 @@ def _preserve_hindi_text(text_list: list[str]) -> list[str]:
 
 
 @contextmanager
-def _hindi_text_normalization():
+def _hindi_text_normalization() -> Generator[None, None, None]:
     """Disable F5-TTS's Chinese-only Pinyin conversion for Hindi text."""
-    from f5_tts.infer import utils_infer
+    from f5_tts.infer import utils_infer  # type: ignore[import-untyped]
 
     with _HINDI_TEXT_NORMALIZATION_LOCK:
         original_converter = utils_infer.convert_char_to_pinyin
@@ -158,14 +154,11 @@ class F5TTSSynthesizer:
             not ckpt_file.strip() or not vocab_file.strip()
         ):
             raise ValueError(
-                f"{DEFAULT_HINDI_TTS_MODEL} requires both ckpt_file "
-                "and vocab_file."
+                f"{DEFAULT_HINDI_TTS_MODEL} requires both ckpt_file and vocab_file.",
             )
 
         if device != "cpu" and not device.startswith("cuda"):
-            raise ValueError(
-                "device must be 'cpu', 'cuda', or 'cuda:<index>'."
-            )
+            raise ValueError("device must be 'cpu', 'cuda', or 'cuda:<index>'.")
 
         self.model_name = model_name
         self.device = device
@@ -179,27 +172,23 @@ class F5TTSSynthesizer:
             return self._tts
 
         try:
-            import torch
+            import torch  # type: ignore[import-untyped]
         except ImportError as exc:
             raise F5TTSNotFoundError(
-                "F5-TTS is not installed. "
-                "Install it using: poetry add f5-tts"
+                "F5-TTS is not installed. Install it using: poetry add f5-tts",
             ) from exc
 
         _preload_cuda_nvrtc(torch)
 
         try:
-            from f5_tts.api import F5TTS
+            from f5_tts.api import F5TTS  # type: ignore[import-untyped]
         except ImportError as exc:
             raise F5TTSNotFoundError(
-                "F5-TTS is not installed. "
-                "Install it using: poetry add f5-tts"
+                "F5-TTS is not installed. Install it using: poetry add f5-tts",
             ) from exc
 
         if self.device.startswith("cuda") and not torch.cuda.is_available():
-            raise VoiceGeneratorError(
-                "CUDA was requested but is unavailable."
-            )
+            raise VoiceGeneratorError("CUDA was requested but is unavailable.")
 
         try:
             model_config = (
@@ -216,8 +205,7 @@ class F5TTSSynthesizer:
 
         except Exception as exc:
             raise F5TTSModelLoadError(
-                f"Unable to load F5-TTS model configuration: "
-                f"{self.model_name}"
+                f"Unable to load F5-TTS model configuration: {self.model_name}",
             ) from exc
 
         return self._tts
@@ -244,7 +232,7 @@ class F5TTSSynthesizer:
             isinstance(speaker_wav, str) and not speaker_wav.strip()
         ):
             raise VoiceSynthesisError(
-                "Speaker reference audio is required for F5-TTS synthesis."
+                "Speaker reference audio is required for F5-TTS synthesis.",
             )
 
         reference = Path(speaker_wav)
@@ -253,7 +241,7 @@ class F5TTSSynthesizer:
         # an audio-specific error even when reference_text is also empty.
         if not reference.is_file() or reference.stat().st_size == 0:
             raise VoiceSynthesisError(
-                f"Speaker reference audio is missing or empty: {reference}"
+                f"Speaker reference audio is missing or empty: {reference}",
             )
 
         # [Existing validation] Preserve the reference transcript type check.
@@ -265,7 +253,7 @@ class F5TTSSynthesizer:
             raise VoiceSynthesisError(
                 "reference_text cannot be empty. Provide the original-language "
                 "transcript or let VoiceGenerator transcribe the speaker profile "
-                "using Faster-Whisper."
+                "using Faster-Whisper.",
             )
 
         destination = Path(output_path)
@@ -293,18 +281,14 @@ class F5TTSSynthesizer:
             destination.unlink(missing_ok=True)
 
             raise VoiceSynthesisError(
-                f"F5-TTS synthesis failed for: {text[:80]!r}"
+                f"F5-TTS synthesis failed for: {text[:80]!r}",
             ) from exc
 
-        if (
-            not destination.is_file()
-            or destination.stat().st_size == 0
-        ):
+        if not destination.is_file() or destination.stat().st_size == 0:
             destination.unlink(missing_ok=True)
 
             raise VoiceSynthesisError(
-                f"F5-TTS did not generate a valid audio file: "
-                f"{destination}"
+                f"F5-TTS did not generate a valid audio file: {destination}",
             )
 
         try:
@@ -317,7 +301,7 @@ class F5TTSSynthesizer:
             destination.unlink(missing_ok=True)
 
             raise VoiceSynthesisError(
-                f"F5-TTS generated an invalid WAV file: {destination}"
+                f"F5-TTS generated an invalid WAV file: {destination}",
             ) from exc
 
         return destination
@@ -341,9 +325,7 @@ class VoiceGenerator:
         tts_model: str = DEFAULT_TTS_MODEL,
         tts_ckpt_file: str = DEFAULT_TTS_CKPT_FILE,
         tts_vocab_file: str = DEFAULT_TTS_VOCAB_FILE,
-        max_profile_duration_seconds: float = (
-            DEFAULT_NUM_SPEAKER_PROFILE_SECONDS
-        ),
+        max_profile_duration_seconds: float = (DEFAULT_NUM_SPEAKER_PROFILE_SECONDS),
         reference_transcriber: Any | None = None,
     ) -> None:
         if (
@@ -351,7 +333,7 @@ class VoiceGenerator:
             or max_profile_duration_seconds <= 0
         ):
             raise ValueError(
-                "max_profile_duration_seconds must be positive and finite."
+                "max_profile_duration_seconds must be positive and finite.",
             )
 
         self.diarizer = diarizer or PyannoteSpeakerDiarizer(
@@ -366,9 +348,7 @@ class VoiceGenerator:
             vocab_file=tts_vocab_file,
         )
 
-        self.max_profile_duration_seconds = (
-            max_profile_duration_seconds
-        )
+        self.max_profile_duration_seconds = max_profile_duration_seconds
 
         self.reference_transcriber = reference_transcriber
 
@@ -379,52 +359,44 @@ class VoiceGenerator:
         """Load and validate the TextTranslator JSON output."""
         if not path.is_file():
             raise InvalidTranslationFileError(
-                f"Translation JSON file does not exist: {path}"
+                f"Translation JSON file does not exist: {path}",
             )
 
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise InvalidTranslationFileError(
-                f"Unable to read translation JSON: {path}"
+                f"Unable to read translation JSON: {path}",
             ) from exc
 
         if not isinstance(data, dict):
             raise InvalidTranslationFileError(
-                "Translation JSON must contain an object."
+                "Translation JSON must contain an object.",
             )
 
         source_language = data.get("source_language")
         target_language = data.get("target_language")
         raw_segments = data.get("segments")
 
-        if (
-            not isinstance(source_language, str)
-            or not source_language.strip()
-        ):
+        if not isinstance(source_language, str) or not source_language.strip():
             raise InvalidTranslationFileError(
-                "source_language must be a non-empty string."
+                "source_language must be a non-empty string.",
             )
 
-        if (
-            not isinstance(target_language, str)
-            or not target_language.strip()
-        ):
+        if not isinstance(target_language, str) or not target_language.strip():
             raise InvalidTranslationFileError(
-                "target_language must be a non-empty string."
+                "target_language must be a non-empty string.",
             )
 
         if not isinstance(raw_segments, list):
-            raise InvalidTranslationFileError(
-                "segments must be a list."
-            )
+            raise InvalidTranslationFileError("segments must be a list.")
 
         segments: list[TranslatedSegment] = []
 
         for index, item in enumerate(raw_segments):
             if not isinstance(item, dict):
                 raise InvalidTranslationFileError(
-                    f"Segment {index} must be a JSON object."
+                    f"Segment {index} must be a JSON object.",
                 )
 
             try:
@@ -434,7 +406,7 @@ class VoiceGenerator:
                 speaker_id = item.get("speaker_id")
             except (KeyError, TypeError, ValueError) as exc:
                 raise InvalidTranslationFileError(
-                    f"Segment {index} has invalid fields."
+                    f"Segment {index} has invalid fields.",
                 ) from exc
 
             if (
@@ -444,20 +416,17 @@ class VoiceGenerator:
                 or end <= start
             ):
                 raise InvalidTranslationFileError(
-                    f"Segment {index} has invalid timestamps."
+                    f"Segment {index} has invalid timestamps.",
                 )
 
             if not isinstance(text, str):
                 raise InvalidTranslationFileError(
-                    f"Segment {index} text must be a string."
+                    f"Segment {index} text must be a string.",
                 )
 
-            if (
-                speaker_id is not None
-                and not isinstance(speaker_id, str)
-            ):
+            if speaker_id is not None and not isinstance(speaker_id, str):
                 raise InvalidTranslationFileError(
-                    f"Segment {index} speaker_id must be a string or null."
+                    f"Segment {index} speaker_id must be a string or null.",
                 )
 
             if text.strip():
@@ -467,7 +436,7 @@ class VoiceGenerator:
                         end=end,
                         text=text.strip(),
                         speaker_id=speaker_id,
-                    )
+                    ),
                 )
 
         segments.sort(key=lambda segment: (segment.start, segment.end))
@@ -483,9 +452,7 @@ class VoiceGenerator:
         """Obtain the original-language transcript for a speaker profile."""
 
         provided_text = (
-            reference_texts.get(speaker_id, "").strip()
-            if reference_texts
-            else ""
+            reference_texts.get(speaker_id, "").strip() if reference_texts else ""
         )
 
         if provided_text:
@@ -496,9 +463,7 @@ class VoiceGenerator:
         if self.reference_transcriber is None:
             return ""
 
-        transcription = self.reference_transcriber.transcribe(
-            profile.reference_wav
-        )
+        transcription = self.reference_transcriber.transcribe(profile.reference_wav)
 
         # Support transcribers that return either text or an object with .text.
         transcribed_text = (
@@ -507,11 +472,7 @@ class VoiceGenerator:
             else getattr(transcription, "text", "")
         )
 
-        return (
-            transcribed_text.strip()
-            if isinstance(transcribed_text, str)
-            else ""
-        )
+        return transcribed_text.strip() if isinstance(transcribed_text, str) else ""
 
     @staticmethod
     def _select_speaker(
@@ -523,8 +484,7 @@ class VoiceGenerator:
         if segment.speaker_id is not None:
             if segment.speaker_id not in profiles:
                 raise VoiceGeneratorError(
-                    f"No reference profile exists for speaker "
-                    f"{segment.speaker_id!r}."
+                    f"No reference profile exists for speaker {segment.speaker_id!r}.",
                 )
 
             return segment.speaker_id
@@ -534,14 +494,11 @@ class VoiceGenerator:
         for turn in turns:
             overlap = max(
                 0.0,
-                min(segment.end, turn.end)
-                - max(segment.start, turn.start),
+                min(segment.end, turn.end) - max(segment.start, turn.start),
             )
 
             if overlap > 0:
-                overlaps[turn.speaker_id] = (
-                    overlaps.get(turn.speaker_id, 0.0) + overlap
-                )
+                overlaps[turn.speaker_id] = overlaps.get(turn.speaker_id, 0.0) + overlap
 
         if overlaps:
             selected = max(overlaps, key=overlaps.__getitem__)
@@ -551,7 +508,7 @@ class VoiceGenerator:
 
         if not turns:
             raise VoiceGeneratorError(
-                "No diarization turns are available for speaker assignment."
+                "No diarization turns are available for speaker assignment.",
             )
 
         midpoint = (segment.start + segment.end) / 2.0
@@ -569,8 +526,7 @@ class VoiceGenerator:
 
         if nearest.speaker_id not in profiles:
             raise VoiceGeneratorError(
-                f"No reference profile exists for speaker "
-                f"{nearest.speaker_id!r}."
+                f"No reference profile exists for speaker {nearest.speaker_id!r}.",
             )
 
         return nearest.speaker_id
@@ -597,13 +553,9 @@ class VoiceGenerator:
         source_audio = Path(source_audio_path)
         destination = Path(output_dir)
 
-        if (
-            not source_audio.is_file()
-            or source_audio.stat().st_size == 0
-        ):
+        if not source_audio.is_file() or source_audio.stat().st_size == 0:
             raise InvalidAudioError(
-                f"Source audio file does not exist or is empty: "
-                f"{source_audio}"
+                f"Source audio file does not exist or is empty: {source_audio}",
             )
 
         if reference_texts is not None:
@@ -611,13 +563,10 @@ class VoiceGenerator:
                 raise TypeError("reference_texts must be a dictionary.")
 
             if any(
-                not isinstance(key, str)
-                or not isinstance(value, str)
+                not isinstance(key, str) or not isinstance(value, str)
                 for key, value in reference_texts.items()
             ):
-                raise TypeError(
-                    "reference_texts must map speaker IDs to strings."
-                )
+                raise TypeError("reference_texts must map speaker IDs to strings.")
 
         (
             source_language,
@@ -641,9 +590,7 @@ class VoiceGenerator:
         )
 
         if not profiles:
-            raise VoiceGeneratorError(
-                "No usable speaker profiles were created."
-            )
+            raise VoiceGeneratorError("No usable speaker profiles were created.")
 
         generated_segments: list[GeneratedSpeechSegment] = []
 
@@ -664,9 +611,7 @@ class VoiceGenerator:
             )
 
             reference_text = (
-                reference_text.strip()
-                if isinstance(reference_text, str)
-                else ""
+                reference_text.strip() if isinstance(reference_text, str) else ""
             )
 
             self.synthesizer.synthesize(
@@ -683,18 +628,14 @@ class VoiceGenerator:
                 audio_path.unlink(missing_ok=True)
 
                 raise VoiceGeneratorError(
-                    f"Unable to inspect generated audio: {audio_path}"
+                    f"Unable to inspect generated audio: {audio_path}",
                 ) from exc
 
-            if (
-                not math.isfinite(actual_duration)
-                or actual_duration <= 0
-            ):
+            if not math.isfinite(actual_duration) or actual_duration <= 0:
                 audio_path.unlink(missing_ok=True)
 
                 raise VoiceGeneratorError(
-                    f"Generated audio has an invalid duration: "
-                    f"{audio_path}"
+                    f"Generated audio has an invalid duration: {audio_path}",
                 )
 
             generated_segments.append(
@@ -705,7 +646,7 @@ class VoiceGenerator:
                     speaker_id=speaker_id,
                     audio_path=audio_path,
                     duration_seconds=actual_duration,
-                )
+                ),
             )
 
         manifest_path = destination / "voice_manifest.json"
@@ -724,8 +665,7 @@ class VoiceGenerator:
                     "reference_wav": str(profile.reference_wav),
                     "profile_duration_seconds": profile.duration_seconds,
                     "reference_text_provided": bool(
-                        reference_texts
-                        and reference_texts.get(speaker_id, "").strip()
+                        reference_texts and reference_texts.get(speaker_id, "").strip(),
                     ),
                     "turns": [
                         {
@@ -741,9 +681,7 @@ class VoiceGenerator:
                 {
                     "start": segment.start,
                     "end": segment.end,
-                    "target_duration_seconds": (
-                        segment.target_duration_seconds
-                    ),
+                    "target_duration_seconds": (segment.target_duration_seconds),
                     "generated_duration_seconds": segment.duration_seconds,
                     "speaker_id": segment.speaker_id,
                     "text": segment.text,
@@ -764,8 +702,7 @@ class VoiceGenerator:
             )
         except OSError as exc:
             raise VoiceGeneratorError(
-                f"Unable to write voice-generation manifest: "
-                f"{manifest_path}"
+                f"Unable to write voice-generation manifest: {manifest_path}",
             ) from exc
 
         return VoiceGenerationResult(

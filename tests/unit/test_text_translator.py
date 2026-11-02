@@ -5,8 +5,8 @@ import pytest
 import torch
 
 from video_translator.text_translator import (
-    CudaUnavailableError,
     DEFAULT_MODEL,
+    CudaUnavailableError,
     ModelLoadError,
     TextSegment,
     TextSegmentError,
@@ -157,9 +157,7 @@ def test_merge_choppy_segments():
     assert len(merged) == 1
     assert merged[0].start == 0.0
     assert merged[0].end == 2.0
-    assert merged[0].text == (
-        "The quick brown fox jumps over the dog."
-    )
+    assert merged[0].text == ("The quick brown fox jumps over the dog.")
 
 
 def test_merge_respects_sentence_boundaries():
@@ -293,9 +291,7 @@ def test_translate_text_uses_nllb(
     assert tokenizer.last_texts == ["Hello world"]
 
     assert model.generate.call_count == 1
-    assert model.generate.call_args.kwargs[
-        "forced_bos_token_id"
-    ] == 11
+    assert model.generate.call_args.kwargs["forced_bos_token_id"] == 11
 
 
 def test_translate_segments_preserves_timestamps(
@@ -344,7 +340,7 @@ def test_translate_segments_preserves_speaker_id(
                 1.0,
                 "Hello.",
                 speaker_id="speaker_1",
-            )
+            ),
         ],
         "en",
         "hi",
@@ -365,7 +361,7 @@ def test_translate_segments_supports_speech_recognizer_objects(
             start=0.0,
             end=1.0,
             text="Hello.",
-        )
+        ),
     ]
 
     result = translator.translate_segments(
@@ -395,7 +391,7 @@ def test_translate_segments_batches_requests(
         side_effect=[
             ["Hola", "Buenos días"],
             ["Adiós"],
-        ]
+        ],
     )
 
     segments = [
@@ -501,9 +497,7 @@ def test_model_load_failure_is_wrapped(monkeypatch):
     fake_transformers = types.ModuleType("transformers")
 
     fake_tokenizer_class = Mock()
-    fake_tokenizer_class.from_pretrained.side_effect = RuntimeError(
-        "Download failed"
-    )
+    fake_tokenizer_class.from_pretrained.side_effect = RuntimeError("Download failed")
 
     fake_model_class = Mock()
 
@@ -531,6 +525,6 @@ def test_model_load_failure_is_wrapped(monkeypatch):
         translator._load_model()
 
     fake_tokenizer_class.from_pretrained.assert_called_once_with(
-        "facebook/nllb-200-1.3B"
+        "facebook/nllb-200-1.3B",
     )
     fake_model_class.from_pretrained.assert_not_called()

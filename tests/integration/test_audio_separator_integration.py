@@ -8,8 +8,8 @@ import pytest
 import soundfile as sf
 
 from video_translator.audio_separator import (
-    AudioSeparator,
     DEFAULT_MODEL,
+    AudioSeparator,
 )
 
 
@@ -30,12 +30,8 @@ def sample_audio(tmp_path: Path) -> Path:
         for index in range(frame_count):
             time_seconds = index / sample_rate
 
-            left = int(
-                12000 * math.sin(2 * math.pi * 220 * time_seconds)
-            )
-            right = int(
-                12000 * math.sin(2 * math.pi * 330 * time_seconds)
-            )
+            left = int(12000 * math.sin(2 * math.pi * 220 * time_seconds))
+            right = int(12000 * math.sin(2 * math.pi * 330 * time_seconds))
 
             frames.extend(struct.pack("<hh", left, right))
 

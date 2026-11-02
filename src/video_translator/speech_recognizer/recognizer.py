@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from faster_whisper import WhisperModel  # type: ignore[import-untyped]
+from faster_whisper.transcribe import TranscriptionSegment  # type: ignore[import-untyped]
+
 DEFAULT_MODEL_SIZE = "small"
 DEFAULT_DEVICE = "auto"
 DEFAULT_COMPUTE_TYPE = "default"
@@ -56,78 +59,74 @@ class TranscriptionResult:
         return " ".join(segment.text for segment in self.segments)
 
 
+@dataclass(frozen=True)
+class SpeechRecognizerConfig:
+    """Configuration for SpeechRecognizer."""
+
+    model_size: str = DEFAULT_MODEL_SIZE
+    device: str = DEFAULT_DEVICE
+    compute_type: str = DEFAULT_COMPUTE_TYPE
+    beam_size: int = DEFAULT_BEAM_SIZE
+    vad_filter: bool = False
+    vad_parameters: dict[str, Any] | None = None
+    word_timestamps: bool = False
+    condition_on_previous_text: bool = True
+    model_instance: Any | None = None
+
+
 class SpeechRecognizer:
     """Transcribe audio using Faster-Whisper."""
 
-    def __init__(
-        self,
-        *,
-        model_size: str = DEFAULT_MODEL_SIZE,
-        device: str = DEFAULT_DEVICE,
-        compute_type: str = DEFAULT_COMPUTE_TYPE,
-        beam_size: int = DEFAULT_BEAM_SIZE,
-        vad_filter: bool = False,
-        vad_parameters: dict[str, Any] | None = None,
-        word_timestamps: bool = False,
-        condition_on_previous_text: bool = True,
-        model_instance: Any | None = None,
-    ) -> None:
-        if not model_size or not model_size.strip():
-            raise ValueError("model_size must not be empty")
+    def __init__(self, *, config: SpeechRecognizerConfig | None = None) -> None:
+        cfg = config or SpeechRecognizerConfig()
 
-        if not device or not device.strip():
-            raise ValueError("device must not be empty")
+        if not cfg.model_size or not cfg.model_size.strip():
+            msg = "model_size must not be empty"
+            raise ValueError(msg)
 
-        if not compute_type or not compute_type.strip():
-            raise ValueError("compute_type must not be empty")
+        if not cfg.device or not cfg.device.strip():
+            msg = "device must not be empty"
+            raise ValueError(msg)
 
-        if beam_size < 1:
-            raise ValueError("beam_size must be greater than zero")
+        if not cfg.compute_type or not cfg.compute_type.strip():
+            msg = "compute_type must not be empty"
+            raise ValueError(msg)
 
-        self.model_size = model_size
-        self.device = device
-        self.compute_type = compute_type
-        self.beam_size = beam_size
-        self.vad_filter = vad_filter
+        if cfg.beam_size < 1:
+            msg = "beam_size must be greater than zero"
+            raise ValueError(msg)
+
+        self.model_size = cfg.model_size
+        self.device = cfg.device
+        self.compute_type = cfg.compute_type
+        self.beam_size = cfg.beam_size
+        self.vad_filter = cfg.vad_filter
         self.vad_parameters = (
-            dict(vad_parameters)
-            if vad_parameters is not None
-            else None
+            dict(cfg.vad_parameters) if cfg.vad_parameters is not None else None
         )
-        self.word_timestamps = word_timestamps
-        self.condition_on_previous_text = condition_on_previous_text
+        self.word_timestamps = cfg.word_timestamps
+        self.condition_on_previous_text = cfg.condition_on_previous_text
 
-        self._model = model_instance
+        self._model = cfg.model_instance
 
     @staticmethod
     def _validate_input(path: Path) -> None:
         if not path.exists():
-            raise InvalidAudioError(
-                f"Input audio file does not exist: {path}"
-            )
+            msg = f"Input audio file does not exist: {path}"
+            raise InvalidAudioError(msg)
 
         if not path.is_file():
-            raise InvalidAudioError(
-                f"Input path is not a file: {path}"
-            )
+            msg = f"Input path is not a file: {path}"
+            raise InvalidAudioError(msg)
 
         if path.stat().st_size == 0:
-            raise InvalidAudioError(
-                f"Input audio file is empty: {path}"
-            )
+            msg = f"Input audio file is empty: {path}"
+            raise InvalidAudioError(msg)
 
-    def _load_model(self) -> Any:
+    def _load_model(self) -> WhisperModel:
         """Load and cache the Faster-Whisper model."""
         if self._model is not None:
             return self._model
-
-        try:
-            from faster_whisper import WhisperModel
-        except ImportError as exc:
-            raise FasterWhisperNotFoundError(
-                "Faster-Whisper is not installed. "
-                "Install it using: poetry add faster-whisper"
-            ) from exc
 
         try:
             self._model = WhisperModel(
@@ -136,16 +135,14 @@ class SpeechRecognizer:
                 compute_type=self.compute_type,
             )
         except Exception as exc:
-            raise ModelLoadError(
-                f"Unable to load Faster-Whisper model: "
-                f"{self.model_size}"
-            ) from exc
+            msg = f"Unable to load Faster-Whisper model: {self.model_size}"
+            raise ModelLoadError(msg) from exc
 
         return self._model
 
     @staticmethod
     def _parse_segment(
-        segment: Any,
+        segment: TranscriptionSegment,
     ) -> TranscriptSegment:
         """Convert a Faster-Whisper segment into a public data object."""
         try:
@@ -154,19 +151,14 @@ class SpeechRecognizer:
             raw_text = segment.text
 
             if not isinstance(raw_text, str):
-                raise TranscriptionError(
-                    "Faster-Whisper returned an invalid segment text."
-                )
+                msg = "Faster-Whisper returned an invalid segment text."
+                raise TranscriptionError(msg)
 
             text = raw_text.strip()
 
-        except TranscriptionError:
-            raise
-
         except (AttributeError, TypeError, ValueError) as exc:
-            raise TranscriptionError(
-                "Faster-Whisper returned an invalid transcript segment."
-            ) from exc
+            msg = "Faster-Whisper returned an invalid transcript segment."
+            raise TranscriptionError(msg) from exc
 
         if (
             not math.isfinite(start)
@@ -174,9 +166,8 @@ class SpeechRecognizer:
             or start < 0
             or end <= start
         ):
-            raise TranscriptionError(
-                "Faster-Whisper returned invalid segment timestamps."
-            )
+            msg = "Faster-Whisper returned invalid segment timestamps."
+            raise TranscriptionError(msg)
 
         return TranscriptSegment(
             start=start,
@@ -211,7 +202,8 @@ class SpeechRecognizer:
         self._validate_input(path)
 
         if language is not None and not language.strip():
-            raise ValueError("language must not be empty")
+            msg = "language must not be empty"
+            raise ValueError(msg)
 
         model = self._load_model()
 
@@ -228,23 +220,17 @@ class SpeechRecognizer:
             )
 
             segments = tuple(
-                self._parse_segment(segment)
-                for segment in segments_iterator
+                self._parse_segment(segment) for segment in segments_iterator
             )
 
-            segments = tuple(
-                segment
-                for segment in segments
-                if segment.text
-            )
+            segments = tuple(segment for segment in segments if segment.text)
 
         except SpeechRecognizerError:
             raise
 
         except Exception as exc:
-            raise TranscriptionError(
-                f"Transcription failed for: {path}"
-            ) from exc
+            msg = f"Transcription failed for: {path}"
+            raise TranscriptionError(msg) from exc
 
         language_code = getattr(info, "language", None)
         language_probability = getattr(
@@ -257,33 +243,30 @@ class SpeechRecognizer:
             try:
                 language_probability = float(language_probability)
             except (TypeError, ValueError) as exc:
-                raise TranscriptionError(
-                    "Faster-Whisper returned an invalid language probability."
-                ) from exc
+                msg = "Faster-Whisper returned an invalid language probability."
+                raise TranscriptionError(msg) from exc
 
             if (
                 not math.isfinite(language_probability)
                 or not 0.0 <= language_probability <= 1.0
             ):
-                raise TranscriptionError(
-                    "Faster-Whisper returned an invalid language probability."
-                )
+                msg = "Faster-Whisper returned an invalid language probability."
+                raise TranscriptionError(msg)
 
         duration_value = getattr(info, "duration", None)
 
-        try:
-            duration = float(duration_value)
-        except (TypeError, ValueError):
+        if duration_value is None:
             duration = 0.0
-
+        else:
+            try:
+                duration = float(duration_value)
+            except (TypeError, ValueError):
+                duration = 0.0
         if not math.isfinite(duration) or duration < 0:
             duration = 0.0
 
         if segments:
-            duration = max(
-                duration,
-                max(segment.end for segment in segments),
-            )
+            duration = max(duration, *(segment.end for segment in segments))
 
         return TranscriptionResult(
             audio_path=path,

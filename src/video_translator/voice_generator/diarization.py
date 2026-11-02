@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-import numpy as np
-import soundfile as sf
-
+import numpy as np  # type: ignore[import-untyped]
+import soundfile as sf  # type: ignore[import-untyped]
 
 DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
 DEFAULT_MAX_PROFILE_DURATION_SECONDS = 20.0
@@ -70,9 +70,7 @@ class PyannoteSpeakerDiarizer:
             raise ValueError("model_name must not be empty.")
 
         if device != "cpu" and not device.startswith("cuda"):
-            raise ValueError(
-                "device must be 'cpu', 'cuda', or 'cuda:<index>'."
-            )
+            raise ValueError("device must be 'cpu', 'cuda', or 'cuda:<index>'.")
 
         self.model_name = model_name
         self.device = device
@@ -82,19 +80,13 @@ class PyannoteSpeakerDiarizer:
     @staticmethod
     def _validate_audio(path: Path) -> None:
         if not path.exists():
-            raise InvalidAudioError(
-                f"Audio file does not exist: {path}"
-            )
+            raise InvalidAudioError(f"Audio file does not exist: {path}")
 
         if not path.is_file():
-            raise InvalidAudioError(
-                f"Audio path is not a file: {path}"
-            )
+            raise InvalidAudioError(f"Audio path is not a file: {path}")
 
         if path.stat().st_size == 0:
-            raise InvalidAudioError(
-                f"Audio file is empty: {path}"
-            )
+            raise InvalidAudioError(f"Audio file is empty: {path}")
 
     def _load_pipeline(self) -> Any:
         """Load the diarization pipeline lazily."""
@@ -108,21 +100,19 @@ class PyannoteSpeakerDiarizer:
                 "Set HF_TOKEN or provide auth_token. "
                 "Accept the model conditions for "
                 "pyannote/speaker-diarization-3.1 and "
-                "pyannote/segmentation-3.0 on Hugging Face."
+                "pyannote/segmentation-3.0 on Hugging Face.",
             )
 
         try:
-            import torch
-            from pyannote.audio import Pipeline
+            import torch  # type: ignore[import-untyped]
+            from pyannote.audio import Pipeline  # type: ignore[import-untyped]
         except ImportError as exc:
             raise PyannoteNotFoundError(
-                "Install pyannote.audio to enable diarization."
+                "Install pyannote.audio to enable diarization.",
             ) from exc
 
         if self.device.startswith("cuda") and not torch.cuda.is_available():
-            raise DiarizationError(
-                "CUDA was requested but is unavailable."
-            )
+            raise DiarizationError("CUDA was requested but is unavailable.")
 
         try:
             pipeline = Pipeline.from_pretrained(
@@ -131,9 +121,7 @@ class PyannoteSpeakerDiarizer:
             )
 
             if pipeline is None:
-                raise RuntimeError(
-                    "The diarization pipeline could not be loaded."
-                )
+                raise RuntimeError("The diarization pipeline could not be loaded.")
 
             pipeline.to(torch.device(self.device))
             self._pipeline = pipeline
@@ -145,7 +133,7 @@ class PyannoteSpeakerDiarizer:
 
         except Exception as exc:
             raise DiarizationError(
-                f"Unable to load diarization model: {self.model_name}"
+                f"Unable to load diarization model: {self.model_name}",
             ) from exc
 
     def diarize(
@@ -166,20 +154,14 @@ class PyannoteSpeakerDiarizer:
             )
 
             if audio.size == 0 or audio.shape[0] == 0:
-                raise InvalidAudioError(
-                    f"Audio file contains no samples: {path}"
-                )
+                raise InvalidAudioError(f"Audio file contains no samples: {path}")
 
             if not np.isfinite(audio).all():
-                raise InvalidAudioError(
-                    f"Audio contains invalid samples: {path}"
-                )
+                raise InvalidAudioError(f"Audio contains invalid samples: {path}")
 
             # soundfile returns (time, channels).
             # pyannote expects a tensor with shape (channels, time).
-            waveform = torch.from_numpy(
-                np.ascontiguousarray(audio.T)
-            )
+            waveform = torch.from_numpy(np.ascontiguousarray(audio.T))
 
             pipeline = self._load_pipeline()
 
@@ -187,7 +169,7 @@ class PyannoteSpeakerDiarizer:
                 {
                     "waveform": waveform,
                     "sample_rate": int(sample_rate),
-                }
+                },
             )
 
             turns: list[SpeakerTurn] = []
@@ -205,17 +187,15 @@ class PyannoteSpeakerDiarizer:
                 )
 
             if annotation is None or not callable(
-                getattr(annotation, "itertracks", None)
+                getattr(annotation, "itertracks", None),
             ):
                 raise DiarizationError(
                     "Pyannote returned an unsupported diarization output. "
                     "Expected an Annotation or an object containing "
-                    "'speaker_diarization'."
+                    "'speaker_diarization'.",
                 )
 
-            for segment, _, speaker_id in annotation.itertracks(
-                yield_label=True
-            ):
+            for segment, _, speaker_id in annotation.itertracks(yield_label=True):
                 start = float(segment.start)
                 end = float(segment.end)
 
@@ -232,17 +212,13 @@ class PyannoteSpeakerDiarizer:
                         start=start,
                         end=end,
                         speaker_id=str(speaker_id),
-                    )
+                    ),
                 )
 
-            turns.sort(
-                key=lambda turn: (turn.start, turn.end)
-            )
+            turns.sort(key=lambda turn: (turn.start, turn.end))
 
             if not turns:
-                raise NoSpeakersDetectedError(
-                    f"No speaker turns detected in: {path}"
-                )
+                raise NoSpeakersDetectedError(f"No speaker turns detected in: {path}")
 
             return turns
 
@@ -254,9 +230,7 @@ class PyannoteSpeakerDiarizer:
             raise
 
         except Exception as exc:
-            raise DiarizationError(
-                f"Speaker diarization failed for: {path}"
-            ) from exc
+            raise DiarizationError(f"Speaker diarization failed for: {path}") from exc
 
     def extract_profiles(
         self,
@@ -264,12 +238,8 @@ class PyannoteSpeakerDiarizer:
         turns: Iterable[SpeakerTurn],
         output_dir: str | Path,
         *,
-        max_duration_seconds: float = (
-            DEFAULT_MAX_PROFILE_DURATION_SECONDS
-        ),
-        min_duration_seconds: float = (
-            DEFAULT_MIN_PROFILE_DURATION_SECONDS
-        ),
+        max_duration_seconds: float = (DEFAULT_MAX_PROFILE_DURATION_SECONDS),
+        min_duration_seconds: float = (DEFAULT_MIN_PROFILE_DURATION_SECONDS),
         padding_seconds: float = DEFAULT_PROFILE_PADDING_SECONDS,
     ) -> dict[str, SpeakerProfile]:
         """Create a reference WAV for each speaker from their source turns."""
@@ -278,29 +248,14 @@ class PyannoteSpeakerDiarizer:
 
         self._validate_audio(path)
 
-        if (
-            not math.isfinite(max_duration_seconds)
-            or max_duration_seconds <= 0
-        ):
-            raise ValueError(
-                "max_duration_seconds must be positive and finite."
-            )
+        if not math.isfinite(max_duration_seconds) or max_duration_seconds <= 0:
+            raise ValueError("max_duration_seconds must be positive and finite.")
 
-        if (
-            not math.isfinite(min_duration_seconds)
-            or min_duration_seconds < 0
-        ):
-            raise ValueError(
-                "min_duration_seconds must be non-negative and finite."
-            )
+        if not math.isfinite(min_duration_seconds) or min_duration_seconds < 0:
+            raise ValueError("min_duration_seconds must be non-negative and finite.")
 
-        if (
-            not math.isfinite(padding_seconds)
-            or padding_seconds < 0
-        ):
-            raise ValueError(
-                "padding_seconds must be non-negative and finite."
-            )
+        if not math.isfinite(padding_seconds) or padding_seconds < 0:
+            raise ValueError("padding_seconds must be non-negative and finite.")
 
         try:
             audio, sample_rate = sf.read(
@@ -309,14 +264,10 @@ class PyannoteSpeakerDiarizer:
                 always_2d=True,
             )
         except Exception as exc:
-            raise InvalidAudioError(
-                f"Unable to read source audio: {path}"
-            ) from exc
+            raise InvalidAudioError(f"Unable to read source audio: {path}") from exc
 
         if audio.shape[0] == 0 or not np.isfinite(audio).all():
-            raise InvalidAudioError(
-                f"Source audio has no usable samples: {path}"
-            )
+            raise InvalidAudioError(f"Source audio has no usable samples: {path}")
 
         mono = audio.mean(axis=1, dtype=np.float32)
         audio_duration = len(mono) / sample_rate
@@ -328,7 +279,7 @@ class PyannoteSpeakerDiarizer:
 
         if not grouped:
             raise NoSpeakersDetectedError(
-                "No speaker turns are available for profile extraction."
+                "No speaker turns are available for profile extraction.",
             )
 
         destination.mkdir(parents=True, exist_ok=True)
@@ -345,9 +296,7 @@ class PyannoteSpeakerDiarizer:
             chunks: list[np.ndarray] = []
             total_frames = 0
 
-            speaker_turns.sort(
-                key=lambda turn: (turn.start, turn.end)
-            )
+            speaker_turns.sort(key=lambda turn: (turn.start, turn.end))
 
             for turn in speaker_turns:
                 if total_frames >= max_frames:
@@ -397,15 +346,11 @@ class PyannoteSpeakerDiarizer:
                 continue
 
             safe_speaker_id = "".join(
-                character
-                if character.isalnum() or character in "-_"
-                else "_"
+                character if character.isalnum() or character in "-_" else "_"
                 for character in speaker_id
             )
 
-            profile_path = (
-                destination / f"{safe_speaker_id}_reference.wav"
-            )
+            profile_path = destination / f"{safe_speaker_id}_reference.wav"
 
             try:
                 sf.write(
@@ -416,7 +361,7 @@ class PyannoteSpeakerDiarizer:
                 )
             except Exception as exc:
                 raise DiarizationError(
-                    f"Unable to save speaker profile: {speaker_id}"
+                    f"Unable to save speaker profile: {speaker_id}",
                 ) from exc
 
             profiles[speaker_id] = SpeakerProfile(
@@ -428,7 +373,7 @@ class PyannoteSpeakerDiarizer:
 
         if not profiles:
             raise NoSpeakersDetectedError(
-                "No speaker profiles could be created from the audio."
+                "No speaker profiles could be created from the audio.",
             )
 
         return profiles

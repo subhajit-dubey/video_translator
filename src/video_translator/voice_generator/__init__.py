@@ -10,17 +10,17 @@ from video_translator.voice_generator.diarization import (
     SpeakerTurn,
 )
 from video_translator.voice_generator.generator import (
+    DEFAULT_HINDI_TTS_MODEL,
     DEFAULT_NUM_SPEAKER_PROFILE_SECONDS,
     DEFAULT_TTS_CKPT_FILE,
     DEFAULT_TTS_DEVICE,
-    DEFAULT_HINDI_TTS_MODEL,
     DEFAULT_TTS_MODEL,
     DEFAULT_TTS_VOCAB_FILE,
     F5TTSModelLoadError,
     F5TTSNotFoundError,
+    F5TTSSynthesizer,
     GeneratedSpeechSegment,
     InvalidTranslationFileError,
-    F5TTSSynthesizer,
     TranslatedSegment,
     UnsupportedTTSConfigurationError,
     VoiceGenerationResult,
@@ -31,10 +31,10 @@ from video_translator.voice_generator.generator import (
 
 __all__ = [
     "DEFAULT_DIARIZATION_MODEL",
+    "DEFAULT_HINDI_TTS_MODEL",
     "DEFAULT_NUM_SPEAKER_PROFILE_SECONDS",
     "DEFAULT_TTS_CKPT_FILE",
     "DEFAULT_TTS_DEVICE",
-    "DEFAULT_HINDI_TTS_MODEL",
     "DEFAULT_TTS_MODEL",
     "DEFAULT_TTS_VOCAB_FILE",
     "DiarizationError",
