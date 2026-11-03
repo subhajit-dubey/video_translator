@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np  # type: ignore[import-untyped]
 
-
 DEFAULT_TTS_DEVICE = (
     "cuda"
     if hasattr(np, "__version__")
@@ -107,7 +106,6 @@ class PiperTTSSynthesizer:
         """
         # Implementation would use Piper TTS library here
         # This is a placeholder - actual implementation depends on Piper TTS
-        pass
 
 
 class F5TTSSynthesizer:
@@ -133,7 +131,6 @@ class F5TTSSynthesizer:
             VoiceSynthesisError: If synthesis fails.
         """
         # Implementation would use F5-TTS library here
-        pass
 
 
 class PyannoteSpeakerDiarizer:
@@ -390,7 +387,7 @@ class VoiceGenerator:
         try:
             info = sf.info(str(audio_path))
             return float(info.duration)
-        except Exception:
+        except (RuntimeError, OSError):
             return 0.0
 
     def _write_manifest(
