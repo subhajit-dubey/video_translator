@@ -170,8 +170,10 @@ class VideoRenderer:
             "-v",
             "error",
             "-show_entries",
-            "format=duration,format_name:"
-            "stream=codec_type,codec_name,duration,width,height",
+            (
+                "format=duration,format_name:"
+                "stream=codec_type,codec_name,duration,width,height"
+            ),
             "-of",
             "json",
             str(path),
