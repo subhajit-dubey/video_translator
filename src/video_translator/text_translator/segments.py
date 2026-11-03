@@ -3,7 +3,19 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Iterable, Any
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+
+class _SegmentLike(Protocol):
+    """Protocol for objects with segment-like attributes."""
+
+    start: float
+    end: float
+    text: str
+    speaker_id: str | None
 
 
 DEFAULT_MAX_GAP_SECONDS = 0.75
@@ -60,7 +72,7 @@ class TranslationResult:
         )
 
 
-def _coerce_segment(segment: Any) -> TextSegment:
+def _coerce_segment(segment: _SegmentLike) -> TextSegment:
     """Convert a compatible segment object into TextSegment."""
     try:
         start = float(segment.start)
@@ -68,29 +80,22 @@ def _coerce_segment(segment: Any) -> TextSegment:
         text = segment.text
         speaker_id = getattr(segment, "speaker_id", None)
     except (AttributeError, TypeError, ValueError) as exc:
-        raise TextSegmentError(
-            "Invalid text segment: expected start, end, and text."
-        ) from exc
+        msg = "Invalid text segment: expected start, end, and text."
+        raise TextSegmentError(msg) from exc
 
     if not math.isfinite(start) or not math.isfinite(end):
-        raise TextSegmentError(
-            "Segment timestamps must be finite."
-        )
+        msg = "Segment timestamps must be finite."
+        raise TextSegmentError(msg)
 
     if start < 0 or end <= start:
-        raise TextSegmentError(
-            "Segment timestamps must satisfy 0 <= start < end."
-        )
+        msg = "Segment timestamps must satisfy 0 <= start < end."
+        raise TextSegmentError(msg)
 
     if not isinstance(text, str):
-        raise TextSegmentError(
-            "Segment text must be a string."
-        )
+        raise TextSegmentError("Segment text must be a string.")
 
     if speaker_id is not None and not isinstance(speaker_id, str):
-        raise TextSegmentError(
-            "speaker_id must be a string or None."
-        )
+        raise TextSegmentError("speaker_id must be a string or None.")
 
     return TextSegment(
         start=start,
@@ -102,11 +107,12 @@ def _coerce_segment(segment: Any) -> TextSegment:
 
 def _ends_sentence(text: str) -> bool:
     """Check whether the text ends with terminal punctuation."""
+    # Use ASCII punctuation to avoid ambiguous unicode characters
     return bool(
         re.search(
-            r"""[.!?…。！？]["'”’)\]]*$""",
+            r"""[.!?\u2026\u3002\u3001\u30fb\uff01\uff1f]["')\]]*$""",
             text.strip(),
-        )
+        ),
     )
 
 
@@ -118,20 +124,11 @@ def normalize_text_segments(
     segments: Iterable[Any],
 ) -> list[TextSegment]:
     """Validate, normalize, and sort segments without merging them."""
-    normalized = [
-        _coerce_segment(segment)
-        for segment in segments
-    ]
+    normalized = [_coerce_segment(segment) for segment in segments]
 
-    normalized = [
-        segment
-        for segment in normalized
-        if segment.text
-    ]
+    normalized = [segment for segment in normalized if segment.text]
 
-    normalized.sort(
-        key=lambda segment: (segment.start, segment.end)
-    )
+    normalized.sort(key=lambda segment: (segment.start, segment.end))
 
     return normalized
 
@@ -155,27 +152,21 @@ def merge_text_segments(
     Timestamps preserve the first segment's start and the last
     segment's end.
     """
-    if (
-        not math.isfinite(max_gap_seconds)
-        or max_gap_seconds < 0
-    ):
-        raise ValueError(
-            "max_gap_seconds must be finite and non-negative."
-        )
+    if not math.isfinite(max_gap_seconds) or max_gap_seconds < 0:
+        msg = "max_gap_seconds must be finite and non-negative."
+        raise ValueError(msg)
 
-    if (
-        not math.isfinite(max_duration_seconds)
-        or max_duration_seconds <= 0
-    ):
-        raise ValueError(
-            "max_duration_seconds must be finite and positive."
-        )
+    if not math.isfinite(max_duration_seconds) or max_duration_seconds <= 0:
+        msg = "max_duration_seconds must be finite and positive."
+        raise ValueError(msg)
 
     if max_characters <= 0:
-        raise ValueError("max_characters must be positive.")
+        msg = "max_characters must be positive."
+        raise ValueError(msg)
 
     if short_segment_words < 0:
-        raise ValueError("short_segment_words must be non-negative.")
+        msg = "short_segment_words must be non-negative."
+        raise ValueError(msg)
 
     normalized = normalize_text_segments(segments)
 
@@ -188,10 +179,7 @@ def merge_text_segments(
     for following in normalized[1:]:
         gap = max(0.0, following.start - current.end)
 
-        combined_text = (
-            f"{current.text.rstrip()} "
-            f"{following.text.lstrip()}"
-        ).strip()
+        combined_text = (f"{current.text.rstrip()} {following.text.lstrip()}").strip()
 
         speaker_changed = (
             current.speaker_id is not None
@@ -208,8 +196,7 @@ def merge_text_segments(
             gap <= max_gap_seconds
             and not speaker_changed
             and not sentence_complete
-            and following.end - current.start
-            <= max_duration_seconds
+            and following.end - current.start <= max_duration_seconds
             and len(combined_text) <= max_characters
         )
 
@@ -218,9 +205,7 @@ def merge_text_segments(
                 start=current.start,
                 end=max(current.end, following.end),
                 text=combined_text,
-                speaker_id=(
-                    current.speaker_id or following.speaker_id
-                ),
+                speaker_id=(current.speaker_id or following.speaker_id),
             )
         else:
             merged.append(current)

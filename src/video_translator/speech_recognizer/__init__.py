@@ -8,9 +8,9 @@ from video_translator.speech_recognizer.recognizer import (
     ModelLoadError,
     SpeechRecognizer,
     SpeechRecognizerError,
-    TranscriptSegment,
     TranscriptionError,
     TranscriptionResult,
+    TranscriptSegment,
 )
 
 __all__ = [

@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 
-import math
 import re
-from typing import Any, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from video_translator.text_translator.segments import (
+        TranslatedTextSegment,
+        TranslationResult,
+    )
 
 from video_translator.text_translator.segments import (
-    TextSegment,
     TranslatedTextSegment,
     TranslationResult,
     merge_text_segments,
     normalize_text_segments,
 )
-
 
 DEFAULT_MODEL = "facebook/nllb-200-1.3B"
 DEFAULT_DEVICE = "cuda"
@@ -94,74 +99,77 @@ class TranslationError(TextTranslatorError):
     """Raised when translation fails."""
 
 
+@dataclass(frozen=True)
+class TextTranslatorConfig:
+    """Configuration for TextTranslator."""
+
+    model_name: str = DEFAULT_MODEL
+    device: str = DEFAULT_DEVICE
+    num_beams: int = DEFAULT_NUM_BEAMS
+    batch_size: int = DEFAULT_BATCH_SIZE
+    max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS
+    merge_segments: bool = True
+    max_gap_seconds: float = 0.75
+    max_merged_duration_seconds: float = 12.0
+    max_merged_characters: int = 500
+    short_segment_words: int = 3
+    model_instance: Any | None = None
+    tokenizer_instance: Any | None = None
+
+
 class TextTranslator:
     """Translate timestamped speech segments using local NLLB on CUDA."""
 
-    def __init__(
-        self,
-        *,
-        model_name: str = DEFAULT_MODEL,
-        device: str = DEFAULT_DEVICE,
-        num_beams: int = DEFAULT_NUM_BEAMS,
-        batch_size: int = DEFAULT_BATCH_SIZE,
-        max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
-        max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
-        merge_segments: bool = True,
-        max_gap_seconds: float = 0.75,
-        max_merged_duration_seconds: float = 12.0,
-        max_merged_characters: int = 500,
-        short_segment_words: int = 3,
-        model_instance: Any | None = None,
-        tokenizer_instance: Any | None = None,
-    ) -> None:
-        if not model_name.strip():
-            raise ValueError("model_name must not be empty.")
+    def __init__(self, *, config: TextTranslatorConfig | None = None) -> None:
+        cfg = config or TextTranslatorConfig()
 
-        if device != "cpu" and not device.startswith("cuda"):
-            raise ValueError(
-                "device must be 'cuda', 'cuda:0', or 'cpu'."
-            )
+        if not cfg.model_name.strip():
+            msg = "model_name must not be empty."
+            raise ValueError(msg)
 
-        if num_beams < 1:
-            raise ValueError("num_beams must be positive.")
+        if cfg.device != "cpu" and not cfg.device.startswith("cuda"):
+            msg = "device must be 'cuda', 'cuda:0', or 'cpu'."
+            raise ValueError(msg)
 
-        if batch_size < 1:
-            raise ValueError("batch_size must be positive.")
+        if cfg.num_beams < 1:
+            msg = "num_beams must be positive."
+            raise ValueError(msg)
 
-        if max_input_tokens < 1 or max_new_tokens < 1:
-            raise ValueError("Token limits must be positive.")
+        if cfg.batch_size < 1:
+            msg = "batch_size must be positive."
+            raise ValueError(msg)
 
-        if (model_instance is None) != (tokenizer_instance is None):
-            raise ValueError(
-                "model_instance and tokenizer_instance "
-                "must be supplied together."
-            )
+        if cfg.max_input_tokens < 1 or cfg.max_new_tokens < 1:
+            msg = "Token limits must be positive."
+            raise ValueError(msg)
 
-        self.model_name = model_name
-        self.device = device
-        self.num_beams = num_beams
-        self.batch_size = batch_size
-        self.max_input_tokens = max_input_tokens
-        self.max_new_tokens = max_new_tokens
+        if (cfg.model_instance is None) != (cfg.tokenizer_instance is None):
+            msg = "model_instance and tokenizer_instance must be supplied together."
+            raise ValueError(msg)
 
-        self.merge_segments = merge_segments
-        self.max_gap_seconds = max_gap_seconds
-        self.max_merged_duration_seconds = (
-            max_merged_duration_seconds
-        )
-        self.max_merged_characters = max_merged_characters
-        self.short_segment_words = short_segment_words
+        self.model_name = cfg.model_name
+        self.device = cfg.device
+        self.num_beams = cfg.num_beams
+        self.batch_size = cfg.batch_size
+        self.max_input_tokens = cfg.max_input_tokens
+        self.max_new_tokens = cfg.max_new_tokens
 
-        self._model = model_instance
-        self._tokenizer = tokenizer_instance
+        self.merge_segments = cfg.merge_segments
+        self.max_gap_seconds = cfg.max_gap_seconds
+        self.max_merged_duration_seconds = cfg.max_merged_duration_seconds
+        self.max_merged_characters = cfg.max_merged_characters
+        self.short_segment_words = cfg.short_segment_words
+
+        self._model = cfg.model_instance
+        self._tokenizer = cfg.tokenizer_instance
 
     @staticmethod
     def resolve_language(language: str) -> str:
         """Resolve a common language name/code to an NLLB FLORES code."""
         if not isinstance(language, str) or not language.strip():
-            raise UnsupportedLanguageError(
-                "A source and target language must be provided."
-            )
+            msg = "A source and target language must be provided."
+            raise UnsupportedLanguageError(msg)
 
         normalized = language.strip()
 
@@ -171,11 +179,12 @@ class TextTranslator:
         if re.fullmatch(r"[a-z]{3}_[A-Z][a-z]{3}", normalized):
             return normalized
 
-        raise UnsupportedLanguageError(
+        msg = (
             f"Unsupported language: {language!r}. "
             "Provide a supported language name, ISO code, "
             "or NLLB FLORES-200 code."
         )
+        raise UnsupportedLanguageError(msg)
 
     def _load_model(self) -> tuple[Any, Any]:
         """Load the tokenizer and model once, directly onto the device."""
@@ -183,30 +192,26 @@ class TextTranslator:
             return self._model, self._tokenizer
 
         try:
-            import torch
-            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+            import torch  # type: ignore[import-not-found]
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer  # type: ignore[import-not-found]
         except ImportError as exc:
-            raise TransformersNotFoundError(
+            msg = (
                 "Install the translation dependencies using: "
                 "poetry add torch transformers sentencepiece"
-            ) from exc
+            )
+            raise TransformersNotFoundError(msg) from exc
 
         if self.device.startswith("cuda") and not torch.cuda.is_available():
-            raise CudaUnavailableError(
+            msg = (
                 "CUDA is unavailable. Install a CUDA-enabled PyTorch build "
                 "and verify that an NVIDIA GPU is accessible."
             )
+            raise CudaUnavailableError(msg)
 
         try:
-            dtype = (
-                torch.float16
-                if self.device.startswith("cuda")
-                else torch.float32
-            )
+            dtype = torch.float16 if self.device.startswith("cuda") else torch.float32
 
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name
-            )
+            self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
             self._model = AutoModelForSeq2SeqLM.from_pretrained(
                 self.model_name,
@@ -219,9 +224,8 @@ class TextTranslator:
             self._model = None
             self._tokenizer = None
 
-            raise ModelLoadError(
-                f"Unable to load translation model: {self.model_name}"
-            ) from exc
+            msg = f"Unable to load translation model: {self.model_name}"
+            raise ModelLoadError(msg) from exc
 
         return self._model, self._tokenizer
 
@@ -237,84 +241,62 @@ class TextTranslator:
 
         model, tokenizer = self._load_model()
 
-        try:
-            import torch
+        import torch
 
-            tokenizer.src_lang = source_code
+        tokenizer.src_lang = source_code
 
-            target_token_id = tokenizer.convert_tokens_to_ids(
-                target_code
+        target_token_id = tokenizer.convert_tokens_to_ids(target_code)
+
+        unknown_token_id = getattr(
+            tokenizer,
+            "unk_token_id",
+            None,
+        )
+
+        if target_token_id is None or (
+            unknown_token_id is not None and target_token_id == unknown_token_id
+        ):
+            msg = f"NLLB does not recognise target language code: {target_code}"
+            raise UnsupportedLanguageError(msg)
+
+        encoded = tokenizer(
+            list(texts),
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.max_input_tokens,
+        )
+
+        encoded = {key: value.to(self.device) for key, value in encoded.items()}
+
+        with torch.inference_mode():
+            generated = model.generate(
+                **encoded,
+                forced_bos_token_id=target_token_id,
+                num_beams=self.num_beams,
+                max_new_tokens=self.max_new_tokens,
             )
 
-            unknown_token_id = getattr(
-                tokenizer,
-                "unk_token_id",
-                None,
-            )
+        translations = tokenizer.batch_decode(
+            generated,
+            skip_special_tokens=True,
+        )
 
-            if (
-                target_token_id is None
-                or (
-                    unknown_token_id is not None
-                    and target_token_id == unknown_token_id
-                )
-            ):
-                raise UnsupportedLanguageError(
-                    f"NLLB does not recognise target language "
-                    f"code: {target_code}"
-                )
+        if len(translations) != len(texts):
+            msg = "The translation model returned an unexpected number of translations."
+            raise TranslationError(msg)
 
-            encoded = tokenizer(
-                list(texts),
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=self.max_input_tokens,
-            )
+        results: list[str] = []
 
-            encoded = {
-                key: value.to(self.device)
-                for key, value in encoded.items()
-            }
-
-            with torch.inference_mode():
-                generated = model.generate(
-                    **encoded,
-                    forced_bos_token_id=target_token_id,
-                    num_beams=self.num_beams,
-                    max_new_tokens=self.max_new_tokens,
-                )
-
-            translations = tokenizer.batch_decode(
-                generated,
-                skip_special_tokens=True,
-            )
-
-            if len(translations) != len(texts):
+        for translation in translations:
+            if not isinstance(translation, str):
                 raise TranslationError(
-                    "The translation model returned an unexpected "
-                    "number of translations."
+                    "The translation model returned non-text output."
                 )
 
-            results = []
+            results.append(translation.strip())
 
-            for translation in translations:
-                if not isinstance(translation, str):
-                    raise TranslationError(
-                        "The translation model returned non-text output."
-                    )
-
-                results.append(translation.strip())
-
-            return results
-
-        except TextTranslatorError:
-            raise
-
-        except Exception as exc:
-            raise TranslationError(
-                "NLLB translation failed."
-            ) from exc
+        return results
 
     def translate_text(
         self,
@@ -357,16 +339,6 @@ class TextTranslator:
         source_code = self.resolve_language(source_language)
         target_code = self.resolve_language(target_language)
 
-        normalized_segments = [
-            TextSegment(
-                start=float(segment.start),
-                end=float(segment.end),
-                text=segment.text,
-                speaker_id=getattr(segment, "speaker_id", None),
-            )
-            for segment in segments
-        ]
-
         if self.merge_segments:
             prepared_segments = merge_text_segments(
                 segments,
@@ -386,15 +358,9 @@ class TextTranslator:
             )
 
         if source_code == target_code:
-            translations = [
-                segment.text
-                for segment in prepared_segments
-            ]
+            translations = [segment.text for segment in prepared_segments]
         else:
-            texts = [
-                segment.text
-                for segment in prepared_segments
-            ]
+            texts = [segment.text for segment in prepared_segments]
 
             translations = []
 
@@ -406,21 +372,21 @@ class TextTranslator:
                         batch,
                         source_code,
                         target_code,
-                    )
+                    ),
                 )
 
         translated_segments = tuple(
-            TranslatedTextSegment(
-                start=segment.start,
-                end=segment.end,
-                source_text=segment.text,
-                translated_text=translation,
-                speaker_id=segment.speaker_id,
-            )
-            for segment, translation in zip(
-                prepared_segments,
-                translations,
-                strict=True,
+            (
+                TranslatedTextSegment(
+                    start=segment.start,
+                    end=segment.end,
+                    source_text=segment.text,
+                    translated_text=translation,
+                    speaker_id=segment.speaker_id,
+                )
+                for segment, translation in zip(
+                    prepared_segments, translations, strict=True
+                )
             )
         )
 

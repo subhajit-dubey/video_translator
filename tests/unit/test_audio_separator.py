@@ -1,5 +1,4 @@
 import builtins
-import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -107,7 +106,7 @@ def test_demucs_model_detection():
     assert AudioSeparator._is_demucs_model("htdemucs_6s.yaml")
     assert not AudioSeparator._is_demucs_model("UVR_MDXNET_KARA_2.onnx")
     assert not AudioSeparator._is_demucs_model(
-        "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
+        "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
     )
 
 
@@ -148,9 +147,7 @@ def test_demucs_separation_returns_vocals_and_instrumental(
     assert result.vocals_path.name == "sample_vocals.wav"
     assert result.instrumental_path.name == "sample_instrumental.wav"
 
-    fake_engine.load_model.assert_called_once_with(
-        model_filename="htdemucs.yaml"
-    )
+    fake_engine.load_model.assert_called_once_with(model_filename="htdemucs.yaml")
 
     fake_engine.separate.assert_called_once_with(
         str(audio_file.resolve()),

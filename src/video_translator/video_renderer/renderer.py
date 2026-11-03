@@ -57,27 +57,20 @@ class VideoRendererConfig:
         if self.audio_channels not in (1, 2):
             raise ValueError("audio_channels must be 1 or 2.")
 
-        if (
-            not math.isfinite(self.dubbed_audio_volume)
-            or self.dubbed_audio_volume <= 0
-        ):
+        if not math.isfinite(self.dubbed_audio_volume) or self.dubbed_audio_volume <= 0:
             raise ValueError("dubbed_audio_volume must be positive and finite.")
 
         if (
             not math.isfinite(self.background_audio_volume)
             or self.background_audio_volume < 0
         ):
-            raise ValueError(
-                "background_audio_volume must be non-negative and finite."
-            )
+            raise ValueError("background_audio_volume must be non-negative and finite.")
 
         if (
             not math.isfinite(self.ffmpeg_timeout_seconds)
             or self.ffmpeg_timeout_seconds <= 0
         ):
-            raise ValueError(
-                "ffmpeg_timeout_seconds must be positive and finite."
-            )
+            raise ValueError("ffmpeg_timeout_seconds must be positive and finite.")
 
 
 @dataclass(frozen=True)
@@ -163,14 +156,10 @@ class VideoRenderer:
         resolved = Path(path).expanduser().resolve()
 
         if not resolved.is_file():
-            raise VideoRendererError(
-                f"{label} does not exist: {resolved}"
-            )
+            raise VideoRendererError(f"{label} does not exist: {resolved}")
 
         if resolved.stat().st_size == 0:
-            raise VideoRendererError(
-                f"{label} is empty: {resolved}"
-            )
+            raise VideoRendererError(f"{label} is empty: {resolved}")
 
         return resolved
 
@@ -201,27 +190,22 @@ class VideoRenderer:
                 f"FFprobe timed out while inspecting: {path}"
             ) from exc
         except OSError as exc:
-            raise VideoRendererError(
-                f"Unable to execute FFprobe for: {path}"
-            ) from exc
+            raise VideoRendererError(f"Unable to execute FFprobe for: {path}") from exc
 
         if completed.returncode != 0:
             raise VideoRendererError(
-                f"FFprobe failed for {path}:\n"
-                f"{completed.stderr[-4000:]}"
+                f"FFprobe failed for {path}:\n{completed.stderr[-4000:]}"
             )
 
         try:
-            metadata = json.loads(completed.stdout)
+            raw_metadata: Any = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             raise VideoRendererError(
                 f"FFprobe returned invalid metadata for: {path}"
             ) from exc
 
-        if not isinstance(metadata, dict):
-            raise VideoRendererError(
-                f"FFprobe returned unexpected metadata for: {path}"
-            )
+        assert isinstance(raw_metadata, dict), "FFprobe returned non-dict metadata"
+        metadata: dict[str, Any] = raw_metadata
 
         return metadata
 
@@ -236,9 +220,7 @@ class VideoRenderer:
 
         if prefer_video_stream:
             candidates = [
-                stream
-                for stream in streams
-                if stream.get("codec_type") == "video"
+                stream for stream in streams if stream.get("codec_type") == "video"
             ]
 
             for stream in candidates:
@@ -275,9 +257,7 @@ class VideoRenderer:
         if stream_durations:
             return max(stream_durations)
 
-        raise VideoRendererError(
-            "Unable to determine a valid media duration."
-        )
+        raise VideoRendererError("Unable to determine a valid media duration.")
 
     @staticmethod
     def _require_stream(
@@ -287,12 +267,10 @@ class VideoRenderer:
     ) -> dict[str, Any]:
         """Return the first stream of a required type."""
         for stream in metadata.get("streams", []):
-            if stream.get("codec_type") == stream_type:
+            if isinstance(stream, dict) and stream.get("codec_type") == stream_type:
                 return stream
 
-        raise VideoRendererError(
-            f"No {stream_type} stream was found in: {path}"
-        )
+        raise VideoRendererError(f"No {stream_type} stream was found in: {path}")
 
     @staticmethod
     def _volume_filter(volume: float) -> str:
@@ -465,9 +443,7 @@ class VideoRenderer:
         destination = Path(output_path).expanduser().resolve()
 
         if destination.suffix.lower() != ".mp4":
-            raise VideoRendererError(
-                "The output filename must use the .mp4 extension."
-            )
+            raise VideoRendererError("The output filename must use the .mp4 extension.")
 
         if destination in (source_video, aligned_audio):
             raise VideoRendererError(
@@ -501,26 +477,14 @@ class VideoRenderer:
             else background_audio_volume
         )
 
-        if (
-            not math.isfinite(dubbed_volume)
-            or dubbed_volume <= 0
-        ):
-            raise ValueError(
-                "dubbed_audio_volume must be positive and finite."
-            )
+        if not math.isfinite(dubbed_volume) or dubbed_volume <= 0:
+            raise ValueError("dubbed_audio_volume must be positive and finite.")
 
-        if (
-            not math.isfinite(background_volume)
-            or background_volume < 0
-        ):
-            raise ValueError(
-                "background_audio_volume must be non-negative and finite."
-            )
+        if not math.isfinite(background_volume) or background_volume < 0:
+            raise ValueError("background_audio_volume must be non-negative and finite.")
 
         if background_audio is None and background_audio_volume is not None:
-            raise ValueError(
-                "background_audio_volume requires background_audio_path."
-            )
+            raise ValueError("background_audio_volume requires background_audio_path.")
 
         source_metadata = self._probe(source_video)
         self._require_stream(
@@ -586,10 +550,7 @@ class VideoRenderer:
                     f"Error output:\n{completed.stderr[-8000:]}"
                 )
 
-            if (
-                not temporary_output.is_file()
-                or temporary_output.stat().st_size == 0
-            ):
+            if not temporary_output.is_file() or temporary_output.stat().st_size == 0:
                 raise VideoRendererError(
                     "FFmpeg completed without producing a valid output file."
                 )

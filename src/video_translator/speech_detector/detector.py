@@ -5,10 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import soundfile as sf
-from scipy.signal import resample_poly
-
+import numpy as np  # type: ignore[import-not-found,import-untyped]
+import soundfile as sf  # type: ignore[import-not-found,import-untyped]
+from scipy.signal import resample_poly  # type: ignore[import-not-found,import-untyped]
 
 DEFAULT_SAMPLE_RATE = 16_000
 DEFAULT_THRESHOLD = 0.5
@@ -37,61 +36,64 @@ class SpeechRegion:
     end: float
 
 
+@dataclass(frozen=True)
+class SpeechDetectorConfig:
+    """Configuration for SpeechDetector."""
+
+    threshold: float = DEFAULT_THRESHOLD
+    min_speech_duration_ms: int = DEFAULT_MIN_SPEECH_DURATION_MS
+    min_silence_duration_ms: int = DEFAULT_MIN_SILENCE_DURATION_MS
+    speech_pad_ms: int = DEFAULT_SPEECH_PAD_MS
+    sample_rate: int = DEFAULT_SAMPLE_RATE
+    model: Any | None = None
+
+
 class SpeechDetector:
     """Detect speech regions using Silero VAD."""
 
-    def __init__(
-        self,
-        *,
-        threshold: float = DEFAULT_THRESHOLD,
-        min_speech_duration_ms: int = DEFAULT_MIN_SPEECH_DURATION_MS,
-        min_silence_duration_ms: int = DEFAULT_MIN_SILENCE_DURATION_MS,
-        speech_pad_ms: int = DEFAULT_SPEECH_PAD_MS,
-        sample_rate: int = DEFAULT_SAMPLE_RATE,
-        model: Any | None = None,
-    ) -> None:
-        if not 0.0 < threshold < 1.0:
-            raise ValueError("threshold must be between 0 and 1")
+    def __init__(self, *, config: SpeechDetectorConfig | None = None) -> None:
+        cfg = config or SpeechDetectorConfig()
 
-        if min_speech_duration_ms < 0:
-            raise ValueError(
-                "min_speech_duration_ms must not be negative"
-            )
+        if not 0.0 < cfg.threshold < 1.0:
+            msg = "threshold must be between 0 and 1"
+            raise ValueError(msg)
 
-        if min_silence_duration_ms < 0:
-            raise ValueError(
-                "min_silence_duration_ms must not be negative"
-            )
+        if cfg.min_speech_duration_ms < 0:
+            msg = "min_speech_duration_ms must not be negative"
+            raise ValueError(msg)
 
-        if speech_pad_ms < 0:
-            raise ValueError("speech_pad_ms must not be negative")
+        if cfg.min_silence_duration_ms < 0:
+            msg = "min_silence_duration_ms must not be negative"
+            raise ValueError(msg)
 
-        if sample_rate not in {8_000, 16_000}:
-            raise ValueError("sample_rate must be 8000 or 16000")
+        if cfg.speech_pad_ms < 0:
+            msg = "speech_pad_ms must not be negative"
+            raise ValueError(msg)
 
-        self.threshold = threshold
-        self.min_speech_duration_ms = min_speech_duration_ms
-        self.min_silence_duration_ms = min_silence_duration_ms
-        self.speech_pad_ms = speech_pad_ms
-        self.sample_rate = sample_rate
-        self._model = model
+        if cfg.sample_rate not in {8_000, 16_000}:
+            msg = "sample_rate must be 8000 or 16000"
+            raise ValueError(msg)
+
+        self.threshold = cfg.threshold
+        self.min_speech_duration_ms = cfg.min_speech_duration_ms
+        self.min_silence_duration_ms = cfg.min_silence_duration_ms
+        self.speech_pad_ms = cfg.speech_pad_ms
+        self.sample_rate = cfg.sample_rate
+        self._model = cfg.model
 
     @staticmethod
     def _validate_input(path: Path) -> None:
         if not path.exists():
-            raise InvalidAudioError(
-                f"Input audio file does not exist: {path}"
-            )
+            msg = f"Input audio file does not exist: {path}"
+            raise InvalidAudioError(msg)
 
         if not path.is_file():
-            raise InvalidAudioError(
-                f"Input path is not a file: {path}"
-            )
+            msg = f"Input path is not a file: {path}"
+            raise InvalidAudioError(msg)
 
         if path.stat().st_size == 0:
-            raise InvalidAudioError(
-                f"Input audio file is empty: {path}"
-            )
+            msg = f"Input audio file is empty: {path}"
+            raise InvalidAudioError(msg)
 
     def _read_audio(self, path: Path) -> tuple[np.ndarray, int]:
         """Read audio, convert it to mono, and validate its samples."""
@@ -102,24 +104,20 @@ class SpeechDetector:
                 always_2d=True,
             )
         except (OSError, RuntimeError, ValueError) as exc:
-            raise InvalidAudioError(
-                f"Unable to read audio file: {path}"
-            ) from exc
+            msg = f"Unable to read audio file: {path}"
+            raise InvalidAudioError(msg) from exc
 
         if audio.size == 0 or audio.shape[0] == 0:
-            raise InvalidAudioError(
-                f"Audio file contains no samples: {path}"
-            )
+            msg = f"Audio file contains no samples: {path}"
+            raise InvalidAudioError(msg)
 
         if sample_rate <= 0:
-            raise InvalidAudioError(
-                f"Invalid audio sample rate: {sample_rate}"
-            )
+            msg = f"Invalid audio sample rate: {sample_rate}"
+            raise InvalidAudioError(msg)
 
         if not np.isfinite(audio).all():
-            raise InvalidAudioError(
-                f"Audio contains invalid samples: {path}"
-            )
+            msg = f"Audio contains invalid samples: {path}"
+            raise InvalidAudioError(msg)
 
         mono_audio = audio.mean(axis=1, dtype=np.float32)
 
@@ -142,31 +140,30 @@ class SpeechDetector:
             ).astype(np.float32, copy=False)
 
         if audio.size == 0:
-            raise InvalidAudioError(
-                f"Audio contains no usable samples: {path}"
-            )
+            msg = f"Audio contains no usable samples: {path}"
+            raise InvalidAudioError(msg)
 
         return np.ascontiguousarray(audio, dtype=np.float32)
 
-    def _load_model(self) -> Any:
+    def _load_model(self) -> object:
         """Load and cache the Silero VAD ONNX model."""
         if self._model is not None:
             return self._model
 
         try:
-            from silero_vad import load_silero_vad
+            from silero_vad import load_silero_vad  # type: ignore[import-untyped]
         except ImportError as exc:
-            raise SileroVADNotFoundError(
+            msg = (
                 "Silero VAD is not installed. "
                 "Install it using: poetry add silero-vad onnxruntime"
-            ) from exc
+            )
+            raise SileroVADNotFoundError(msg) from exc
 
         try:
             self._model = load_silero_vad(onnx=True)
         except Exception as exc:
-            raise SpeechDetectorError(
-                "Unable to load the Silero VAD ONNX model."
-            ) from exc
+            msg = "Unable to load the Silero VAD ONNX model."
+            raise SpeechDetectorError(msg) from exc
 
         return self._model
 
@@ -175,37 +172,27 @@ class SpeechDetector:
         audio: np.ndarray,
     ) -> list[dict[str, Any]]:
         """Run Silero VAD and return speech timestamps in seconds."""
-        try:
-            import torch
-            from silero_vad import get_speech_timestamps
-        except ImportError as exc:
-            raise SileroVADNotFoundError(
-                "Silero VAD and PyTorch must be installed."
-            ) from exc
+        import torch  # type: ignore[import-untyped]
+        from silero_vad import get_speech_timestamps
 
         model = self._load_model()
         waveform = torch.from_numpy(audio)
 
         try:
             with torch.inference_mode():
-                timestamps = get_speech_timestamps(
+                timestamps: list[dict[str, Any]] = get_speech_timestamps(
                     waveform,
                     model,
                     threshold=self.threshold,
                     sampling_rate=self.sample_rate,
-                    min_speech_duration_ms=(
-                        self.min_speech_duration_ms
-                    ),
-                    min_silence_duration_ms=(
-                        self.min_silence_duration_ms
-                    ),
+                    min_speech_duration_ms=(self.min_speech_duration_ms),
+                    min_silence_duration_ms=(self.min_silence_duration_ms),
                     speech_pad_ms=self.speech_pad_ms,
                     return_seconds=True,
                 )
         except Exception as exc:
-            raise SpeechDetectorError(
-                "Silero VAD inference failed."
-            ) from exc
+            msg = "Silero VAD inference failed."
+            raise SpeechDetectorError(msg) from exc
 
         return timestamps
 
@@ -232,19 +219,16 @@ class SpeechDetector:
                 start = float(timestamp["start"])
                 end = float(timestamp["end"])
             except (KeyError, TypeError, ValueError) as exc:
-                raise SpeechDetectorError(
-                    "Silero VAD returned an invalid speech interval."
-                ) from exc
+                msg = "Silero VAD returned an invalid speech interval."
+                raise SpeechDetectorError(msg) from exc
 
             if not math.isfinite(start) or not math.isfinite(end):
-                raise SpeechDetectorError(
-                    "Silero VAD returned non-finite timestamps."
-                )
+                msg = "Silero VAD returned non-finite timestamps."
+                raise SpeechDetectorError(msg)
 
             if start < 0 or end <= start:
-                raise SpeechDetectorError(
-                    "Silero VAD returned invalid interval boundaries."
-                )
+                msg = "Silero VAD returned invalid interval boundaries."
+                raise SpeechDetectorError(msg)
 
             start = min(start, duration_seconds)
             end = min(end, duration_seconds)
@@ -256,7 +240,7 @@ class SpeechDetector:
                 SpeechRegion(
                     start=start,
                     end=end,
-                )
+                ),
             )
 
         return sorted(regions, key=lambda region: region.start)

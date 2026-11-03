@@ -38,7 +38,7 @@ def detector(monkeypatch) -> SpeechDetector:
             return_value=[
                 {"start": 0.25, "end": 0.75},
                 {"start": 1.0, "end": 1.5},
-            ]
+            ],
         ),
     )
 
@@ -138,7 +138,7 @@ def test_detect_resamples_audio(
             return_value=(
                 np.zeros(8_000, dtype=np.float32),
                 8_000,
-            )
+            ),
         ),
     )
 
@@ -165,9 +165,7 @@ def test_detect_propagates_inference_error(
     detector,
     audio_file,
 ):
-    detector._run_inference.side_effect = SpeechDetectorError(
-        "Inference failed"
-    )
+    detector._run_inference.side_effect = SpeechDetectorError("Inference failed")
 
     with pytest.raises(SpeechDetectorError, match="Inference failed"):
         detector.detect(audio_file)
@@ -211,9 +209,7 @@ def test_model_load_error_is_wrapped(monkeypatch):
     import types
 
     fake_module = types.ModuleType("silero_vad")
-    fake_module.load_silero_vad = Mock(
-        side_effect=RuntimeError("Model load failed")
-    )
+    fake_module.load_silero_vad = Mock(side_effect=RuntimeError("Model load failed"))
 
     monkeypatch.setitem(sys.modules, "silero_vad", fake_module)
 

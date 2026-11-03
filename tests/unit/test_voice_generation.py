@@ -28,9 +28,7 @@ class FakeReferenceTranscriber:
     """Mock Faster-Whisper reference transcription."""
 
     def transcribe(self, audio_path):
-        return SimpleNamespace(
-            text=f"Original speech from {Path(audio_path).stem}."
-        )
+        return SimpleNamespace(text=f"Original speech from {Path(audio_path).stem}.")
 
 
 class FakeAnnotation:
@@ -88,7 +86,7 @@ class FakeSynthesizer:
                 "speaker_wav": Path(speaker_wav),
                 "reference_text": reference_text,
                 "output_path": Path(output_path),
-            }
+            },
         )
 
         output = Path(output_path)
@@ -96,10 +94,13 @@ class FakeSynthesizer:
 
         sample_rate = 22050
         duration = 0.8
-        time = np.arange(
-            int(sample_rate * duration),
-            dtype=np.float32,
-        ) / sample_rate
+        time = (
+            np.arange(
+                int(sample_rate * duration),
+                dtype=np.float32,
+            )
+            / sample_rate
+        )
 
         audio = 0.2 * np.sin(2 * np.pi * 220 * time)
 
@@ -248,13 +249,7 @@ def test_preload_cuda_nvrtc_loads_matching_runtime_library(
     monkeypatch,
 ):
     site_packages = tmp_path / "site-packages"
-    nvrtc_path = (
-        site_packages
-        / "nvidia"
-        / "cuda_nvrtc"
-        / "lib"
-        / "libnvrtc.so.12"
-    )
+    nvrtc_path = site_packages / "nvidia" / "cuda_nvrtc" / "lib" / "libnvrtc.so.12"
     nvrtc_path.parent.mkdir(parents=True)
     nvrtc_path.touch()
 
@@ -416,9 +411,7 @@ def test_piper_selects_voice_from_speaker_profile_pitch(tmp_path):
     assert synthesizer.select_voice(profile_path, "SPEAKER_00") == (
         "hi_IN-priyamvada-medium"
     )
-    assert synthesizer.speaker_voice_map == {
-        "SPEAKER_00": "hi_IN-priyamvada-medium"
-    }
+    assert synthesizer.speaker_voice_map == {"SPEAKER_00": "hi_IN-priyamvada-medium"}
     assert synthesizer.speaker_pitch_map["SPEAKER_00"] >= 165
 
 
@@ -450,9 +443,7 @@ def test_piper_synthesizer_adjusts_speed_for_target_duration(
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
             wav_file.setframerate(sample_rate)
-            wav_file.writeframes(
-                b"\0\0" * int(sample_rate * duration)
-            )
+            wav_file.writeframes(b"\0\0" * int(sample_rate * duration))
 
     class FakeSynthesisConfig:
         def __init__(self, *, length_scale):
@@ -463,6 +454,7 @@ def test_piper_synthesizer_adjusts_speed_for_target_duration(
         "piper",
         SimpleNamespace(SynthesisConfig=FakeSynthesisConfig),
     )
+
     def load_fake_voice(path):
         assert path.suffix == ".onnx"
         return FakeVoice()
@@ -482,9 +474,7 @@ def test_piper_synthesizer_adjusts_speed_for_target_duration(
     )
 
     assert result == output_path
-    assert synthesizer.speaker_voice_map["SPEAKER_00"] == (
-        "hi_IN-pratham-medium"
-    )
+    assert synthesizer.speaker_voice_map["SPEAKER_00"] == ("hi_IN-pratham-medium")
     assert 0.67 <= sf.info(str(output_path)).duration <= 1.50
 
 
@@ -521,6 +511,7 @@ def test_voice_generator_uses_piper_without_reference_transcriber(
         "piper",
         SimpleNamespace(SynthesisConfig=FakeSynthesisConfig),
     )
+
     def load_fake_voice(path):
         assert path.suffix == ".onnx"
         return FakeVoice()
@@ -581,9 +572,7 @@ def test_generate_missing_source_audio_raises_invalid_audio_error(
 
 def test_missing_translation_json_raises_error(tmp_path):
     with pytest.raises(InvalidTranslationFileError):
-        VoiceGenerator._load_translation_file(
-            tmp_path / "missing.json"
-        )
+        VoiceGenerator._load_translation_file(tmp_path / "missing.json")
 
 
 def test_generate_creates_audio_for_each_speaker(
@@ -613,9 +602,7 @@ def test_generate_creates_audio_for_each_speaker(
 
     assert result.manifest_path.is_file()
 
-    manifest = json.loads(
-        result.manifest_path.read_text(encoding="utf-8")
-    )
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["target_language"] == "hin_Deva"
     assert manifest["alignment_pending"] is True
@@ -667,10 +654,7 @@ def test_generate_uses_matching_speaker_reference(
         != fake_synthesizer.calls[1]["speaker_wav"]
     )
 
-    assert all(
-        call["reference_text"].strip()
-        for call in fake_synthesizer.calls
-    )
+    assert all(call["reference_text"].strip() for call in fake_synthesizer.calls)
 
 
 def test_generate_uses_provided_reference_transcripts(
@@ -690,10 +674,7 @@ def test_generate_uses_provided_reference_transcripts(
         },
     )
 
-    assert [
-        call["reference_text"]
-        for call in fake_synthesizer.calls
-    ] == [
+    assert [call["reference_text"] for call in fake_synthesizer.calls] == [
         "Hello, how are you?",
         "Welcome to the presentation.",
     ]
@@ -786,9 +767,9 @@ def test_invalid_timestamp_in_translation_json(tmp_path):
                         "start": 2.0,
                         "end": 1.0,
                         "text": "Invalid segment",
-                    }
+                    },
                 ],
-            }
+            },
         ),
         encoding="utf-8",
     )
@@ -843,8 +824,7 @@ def test_f5_synthesizer_calls_infer_and_saves_audio(
 
     assert fake_model.call_kwargs["ref_file"] == str(source_audio)
     assert (
-        fake_model.call_kwargs["ref_text"]
-        == "This is the speaker's original speech."
+        fake_model.call_kwargs["ref_text"] == "This is the speaker's original speech."
     )
     assert fake_model.call_kwargs["gen_text"] == "Hello there."
     assert fake_model.call_kwargs["file_wave"] == str(output)
