@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CLUSTERING_THRESHOLD = 0.25
 DEFAULT_MIN_CLUSTER_SIZE = 0.5
