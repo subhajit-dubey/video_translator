@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np  # type: ignore[import-untyped]
 import soundfile as sf  # type: ignore[import-untyped]
 
-
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_FADER_LENGTH_SECONDS = 0.5
 
@@ -187,7 +186,7 @@ class AudioAligner:
 
         # Read audio files
         try:
-            generated_audio, gen_sample_rate = sf.read(
+            generated_audio, _gen_sample_rate = sf.read(
                 str(generated),
                 dtype="float32",
                 always_2d=True,
@@ -277,7 +276,7 @@ class AudioAligner:
         try:
             info = sf.info(str(destination))
             duration = float(info.duration)
-        except Exception:
+        except (RuntimeError, OSError):
             duration = len(aligned_audio) / sample_rate
 
         return AlignedSpeechSegment(
