@@ -6,8 +6,8 @@ from video_translator.video_renderer.renderer import (
 )
 
 __all__ = [
+    "VideoRenderResult",
     "VideoRenderer",
     "VideoRendererConfig",
     "VideoRendererError",
-    "VideoRenderResult",
 ]
