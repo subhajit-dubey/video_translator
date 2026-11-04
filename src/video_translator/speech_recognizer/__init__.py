@@ -1,5 +1,4 @@
 from video_translator.speech_recognizer.recognizer import (
-    SpeechRecognizerConfig,
     DEFAULT_BEAM_SIZE,
     DEFAULT_COMPUTE_TYPE,
     DEFAULT_DEVICE,
@@ -8,6 +7,7 @@ from video_translator.speech_recognizer.recognizer import (
     InvalidAudioError,
     ModelLoadError,
     SpeechRecognizer,
+    SpeechRecognizerConfig,
     SpeechRecognizerError,
     TranscriptionError,
     TranscriptionResult,

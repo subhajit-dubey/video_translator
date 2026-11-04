@@ -11,7 +11,6 @@ from video_translator.text_translator.segments import (
     normalize_text_segments,
 )
 from video_translator.text_translator.translator import (
-    TextTranslatorConfig,
     DEFAULT_BATCH_SIZE,
     DEFAULT_DEVICE,
     DEFAULT_MAX_INPUT_TOKENS,
@@ -21,6 +20,7 @@ from video_translator.text_translator.translator import (
     CudaUnavailableError,
     ModelLoadError,
     TextTranslator,
+    TextTranslatorConfig,
     TextTranslatorError,
     TransformersNotFoundError,
     TranslationError,
