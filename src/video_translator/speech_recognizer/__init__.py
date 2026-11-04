@@ -1,4 +1,5 @@
 from video_translator.speech_recognizer.recognizer import (
+    SpeechRecognizerConfig,
     DEFAULT_BEAM_SIZE,
     DEFAULT_COMPUTE_TYPE,
     DEFAULT_DEVICE,
@@ -22,6 +23,7 @@ __all__ = [
     "InvalidAudioError",
     "ModelLoadError",
     "SpeechRecognizer",
+    "SpeechRecognizerConfig",
     "SpeechRecognizerError",
     "TranscriptSegment",
     "TranscriptionError",
