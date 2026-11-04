@@ -2,6 +2,7 @@ from video_translator.voice_generator.diarization import (
     DiarizationError,
     InvalidAudioError,
     PyannoteSpeakerDiarizer,
+    SpeakerProfile,
     SpeakerTurn,
 )
 from video_translator.voice_generator.generator import (
@@ -24,7 +25,6 @@ from video_translator.voice_generator.generator import (
     NoSpeakersDetectedError,
     PiperTTSSynthesizer,
     PyannoteNotFoundError,
-    SpeakerProfile,
     TranslatedSegment,
     UnsupportedTTSConfigurationError,
     VoiceGenerationResult,
