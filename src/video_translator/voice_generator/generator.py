@@ -214,6 +214,9 @@ class VoiceGenerationResult:
     output_dir: Path
     manifest_path: Path
     segments: tuple[GeneratedSpeechSegment, ...]
+    source_language: str
+    target_language: str
+    speaker_profiles: dict[str, SpeakerProfile]
 
 
 @dataclass(frozen=True)
@@ -225,6 +228,8 @@ class GeneratedSpeechSegment:
     audio_path: Path
     duration_seconds: float
     target_duration_seconds: float
+    start: float = 0.0
+    end: float = 0.0
 
 
 class VoiceGenerator:
@@ -255,6 +260,9 @@ class VoiceGenerator:
         output_dir: str | Path,
         *,
         reference_audio_path: str | Path | None = None,
+        source_language: str = "eng_Latn",
+        target_language: str = "hin_Deva",
+        speaker_profiles: dict[str, SpeakerProfile] | None = None,
     ) -> VoiceGenerationResult:
         """Generate voices for all speakers in a translated script.
 
@@ -323,6 +331,9 @@ class VoiceGenerator:
             output_dir=destination,
             manifest_path=manifest_path,
             segments=tuple(generated_segments.values()),
+            source_language=source_language,
+            target_language=target_language,
+            speaker_profiles=speaker_profiles or {},
         )
 
     def _parse_translated_text(self, content: str) -> dict[str, str]:
