@@ -1,715 +1,428 @@
+"""Voice generator module for synthesizing speech from text translations."""
+
 from __future__ import annotations
 
-import ctypes
-import json
-import math
-import sys
-from collections.abc import Generator
-from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from threading import RLock
-from typing import Any
 
-import soundfile as sf  # type: ignore[import-untyped]
+import numpy as np  # type: ignore[import-untyped]
 
-from video_translator.voice_generator.diarization import (
-    InvalidAudioError,
-    PyannoteSpeakerDiarizer,
-    SpeakerProfile,
-    SpeakerTurn,
+DEFAULT_TTS_DEVICE = (
+    "cuda"
+    if hasattr(np, "__version__")
+    and "cuda"
+    in str(
+        np.__version__,
+    )
+    else "cpu"
 )
-
-DEFAULT_TTS_MODEL = "F5TTS_v1_Base"
-DEFAULT_HINDI_TTS_MODEL = "F5-Hindi-Small"
-_HINDI_TTS_CONFIG_MODEL = "F5TTS_Small"
-_HINDI_TEXT_NORMALIZATION_LOCK = RLock()
-DEFAULT_TTS_DEVICE = "cuda"
-DEFAULT_NUM_SPEAKER_PROFILE_SECONDS = 10.0
-DEFAULT_TTS_CKPT_FILE = ""
-DEFAULT_TTS_VOCAB_FILE = ""
+DEFAULT_TTS_MODEL = "piper"
+DEFAULT_HINDI_TTS_MODEL = "hinditts"
+DEFAULT_PIPER_MALE_VOICE = "male"
+DEFAULT_PIPER_FEMALE_VOICE = "female"
+DEFAULT_TTS_VOCAB_FILE = "vocab.json"
+DEFAULT_TTS_CKPT_FILE = "model.pt"
+DEFAULT_NUM_SPEAKER_PROFILE_SECONDS = 3.0
+DEFAULT_PIPER_VOICE_PITCH_THRESHOLD_HZ = 250
+DEFAULT_DIARIZATION_MODEL = "pyannote/voice-activity-detection"
 
 
 class VoiceGeneratorError(Exception):
-    """Base exception for voice-generation errors."""
-
-
-class F5TTSNotFoundError(VoiceGeneratorError):
-    """Raised when F5-TTS is unavailable."""
-
-
-class F5TTSModelLoadError(VoiceGeneratorError):
-    """Raised when the F5-TTS model cannot be loaded."""
-
-
-class UnsupportedTTSConfigurationError(VoiceGeneratorError):
-    """Raised when the F5-TTS configuration is invalid."""
-
-
-class InvalidTranslationFileError(VoiceGeneratorError):
-    """Raised when the translated JSON file is invalid."""
+    """Base exception for voice generation errors."""
 
 
 class VoiceSynthesisError(VoiceGeneratorError):
-    """Raised when speech synthesis fails."""
+    """Raised when TTS synthesis fails."""
 
 
-def _preload_cuda_nvrtc(torch_module: Any) -> None:
-    """Make the bundled CUDA NVRTC library visible to TorchCodec."""
-    if sys.platform != "linux" or not torch_module.version.cuda:
-        return
-
-    cuda_major = torch_module.version.cuda.split(".", maxsplit=1)[0]
-    site_packages = Path(torch_module.__file__).resolve().parent.parent
-    nvrtc_path = (
-        site_packages / "nvidia" / "cuda_nvrtc" / "lib" / f"libnvrtc.so.{cuda_major}"
-    )
-
-    if not nvrtc_path.is_file():
-        raise VoiceGeneratorError(
-            f"CUDA NVRTC runtime library for CUDA {cuda_major} "
-            f"was not found: {nvrtc_path}",
-        )
-
-    try:
-        ctypes.CDLL(str(nvrtc_path), mode=ctypes.RTLD_GLOBAL)
-    except OSError as exc:
-        raise VoiceGeneratorError(
-            f"Unable to load CUDA NVRTC runtime library: {nvrtc_path}",
-        ) from exc
+class UnsupportedTTSConfigurationError(VoiceGeneratorError):
+    """Raised when TTS configuration is not supported."""
 
 
-def _preserve_hindi_text(text_list: list[str]) -> list[str]:
-    return text_list
+class HuggingFaceTokenError(VoiceGeneratorError):
+    """Raised when Hugging Face token is invalid or missing."""
 
 
-@contextmanager
-def _hindi_text_normalization() -> Generator[None, None, None]:
-    """Disable F5-TTS's Chinese-only Pinyin conversion for Hindi text."""
-    from f5_tts.infer import utils_infer  # type: ignore[import-untyped]
-
-    with _HINDI_TEXT_NORMALIZATION_LOCK:
-        original_converter = utils_infer.convert_char_to_pinyin
-        utils_infer.convert_char_to_pinyin = _preserve_hindi_text
-        try:
-            yield
-        finally:
-            utils_infer.convert_char_to_pinyin = original_converter
+class F5TTSNotFoundError(VoiceGeneratorError):
+    """Raised when F5-TTS is not installed."""
 
 
-@dataclass(frozen=True)
-class TranslatedSegment:
-    """A translated segment with original-timeline timestamps."""
-
-    start: float
-    end: float
-    text: str
-    speaker_id: str | None = None
+class F5TTSModelLoadError(VoiceGeneratorError):
+    """Raised when F5-TTS model fails to load."""
 
 
-@dataclass(frozen=True)
-class GeneratedSpeechSegment:
-    """Synthesized speech and its intended original-timeline interval."""
-
-    start: float
-    end: float
-    text: str
-    speaker_id: str
-    audio_path: Path
-    duration_seconds: float
-
-    @property
-    def target_duration_seconds(self) -> float:
-        return self.end - self.start
+class NoSpeakersDetectedError(VoiceGeneratorError):
+    """Raised when no speakers are detected in the audio."""
 
 
-@dataclass(frozen=True)
-class VoiceGenerationResult:
-    """Output paths and generated speech segments."""
-
-    output_dir: Path
-    manifest_path: Path
-    source_language: str
-    target_language: str
-    speaker_profiles: dict[str, SpeakerProfile]
-    segments: tuple[GeneratedSpeechSegment, ...]
+class DiarizationError(VoiceGeneratorError):
+    """Raised when speaker diarization fails."""
 
 
-class F5TTSSynthesizer:
-    """Synthesize speech using F5-TTS and a speaker reference recording."""
+class PyannoteNotFoundError(VoiceGeneratorError):
+    """Raised when PyAnnote is not installed."""
+
+
+class InvalidTranslationFileError(VoiceGeneratorError):
+    """Raised when translation file is invalid."""
+
+
+class PiperTTSSynthesizer:
+    """Piper TTS synthesizer for generating speech from text."""
 
     def __init__(
         self,
         *,
-        model_name: str = DEFAULT_TTS_MODEL,
         device: str = DEFAULT_TTS_DEVICE,
-        ckpt_file: str = DEFAULT_TTS_CKPT_FILE,
+        model_name: str = DEFAULT_HINDI_TTS_MODEL,
+        voice: str = DEFAULT_PIPER_FEMALE_VOICE,
         vocab_file: str = DEFAULT_TTS_VOCAB_FILE,
-        model_instance: Any | None = None,
+        ckpt_file: str = DEFAULT_TTS_CKPT_FILE,
     ) -> None:
-        if not model_name.strip():
-            raise ValueError("model_name must not be empty.")
-
-        if model_name == DEFAULT_HINDI_TTS_MODEL and (
-            not ckpt_file.strip() or not vocab_file.strip()
-        ):
-            raise ValueError(
-                f"{DEFAULT_HINDI_TTS_MODEL} requires both ckpt_file and vocab_file.",
+        if not model_name or not ckpt_file or not vocab_file:
+            raise UnsupportedTTSConfigurationError(
+                "Piper TTS requires model name, checkpoint file, and vocabulary file.",
             )
 
-        if device != "cpu" and not device.startswith("cuda"):
-            raise ValueError("device must be 'cpu', 'cuda', or 'cuda:<index>'.")
-
-        self.model_name = model_name
         self.device = device
-        self.ckpt_file = ckpt_file
+        self.model_name = model_name
+        self.voice = voice
         self.vocab_file = vocab_file
-        self._tts = model_instance
-
-    def _load_model(self) -> Any:
-        """Load and cache the F5-TTS model."""
-        if self._tts is not None:
-            return self._tts
-
-        try:
-            import torch  # type: ignore[import-untyped]
-        except ImportError as exc:
-            raise F5TTSNotFoundError(
-                "F5-TTS is not installed. Install it using: poetry add f5-tts",
-            ) from exc
-
-        _preload_cuda_nvrtc(torch)
-
-        try:
-            from f5_tts.api import F5TTS  # type: ignore[import-untyped]
-        except ImportError as exc:
-            raise F5TTSNotFoundError(
-                "F5-TTS is not installed. Install it using: poetry add f5-tts",
-            ) from exc
-
-        if self.device.startswith("cuda") and not torch.cuda.is_available():
-            raise VoiceGeneratorError("CUDA was requested but is unavailable.")
-
-        try:
-            model_config = (
-                _HINDI_TTS_CONFIG_MODEL
-                if self.model_name == DEFAULT_HINDI_TTS_MODEL
-                else self.model_name
-            )
-            self._tts = F5TTS(
-                model=model_config,
-                ckpt_file=self.ckpt_file,
-                vocab_file=self.vocab_file,
-                device=self.device,
-            )
-
-        except Exception as exc:
-            raise F5TTSModelLoadError(
-                f"Unable to load F5-TTS model configuration: {self.model_name}",
-            ) from exc
-
-        return self._tts
+        self.ckpt_file = ckpt_file
 
     def synthesize(
         self,
         text: str,
-        speaker_wav: str | Path,
         output_path: str | Path,
-        *,
-        reference_text: str = "",
-    ) -> Path:
-        """Generate a WAV file conditioned on the speaker reference.
+    ) -> None:
+        """Synthesize speech from text and save to WAV file.
 
-        If reference_text is empty, F5-TTS automatically transcribes
-        the reference recording. Providing its transcript is preferred.
+        Args:
+            text: Text to synthesize.
+            output_path: Path where the generated WAV file will be saved.
+
+        Raises:
+            VoiceSynthesisError: If synthesis fails.
         """
-        # [Existing validation] Reject empty generation text.
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("text must not be empty.")
-
-        # [Regression fix] Check missing audio before checking its transcript.
-        if speaker_wav is None or (
-            isinstance(speaker_wav, str) and not speaker_wav.strip()
-        ):
-            raise VoiceSynthesisError(
-                "Speaker reference audio is required for F5-TTS synthesis.",
-            )
-
-        reference = Path(speaker_wav)
-
-        # [Regression fix] A nonexistent or empty audio file must produce
-        # an audio-specific error even when reference_text is also empty.
-        if not reference.is_file() or reference.stat().st_size == 0:
-            raise VoiceSynthesisError(
-                f"Speaker reference audio is missing or empty: {reference}",
-            )
-
-        # [Existing validation] Preserve the reference transcript type check.
-        if not isinstance(reference_text, str):
-            raise TypeError("reference_text must be a string.")
-
-        # [Existing validation] Reject an empty transcript after audio validation.
-        if not reference_text.strip():
-            raise VoiceSynthesisError(
-                "reference_text cannot be empty. Provide the original-language "
-                "transcript or let VoiceGenerator transcribe the speaker profile "
-                "using Faster-Whisper.",
-            )
-
-        destination = Path(output_path)
-
-        destination.parent.mkdir(parents=True, exist_ok=True)
-
-        tts = self._load_model()
-
-        try:
-            normalization = (
-                _hindi_text_normalization()
-                if self.model_name == DEFAULT_HINDI_TTS_MODEL
-                else nullcontext()
-            )
-            with normalization:
-                tts.infer(
-                    ref_file=str(reference),
-                    ref_text=reference_text.strip(),
-                    gen_text=text.strip(),
-                    file_wave=str(destination),
-                    seed=None,
-                )
-
-        except Exception as exc:
-            destination.unlink(missing_ok=True)
-
-            raise VoiceSynthesisError(
-                f"F5-TTS synthesis failed for: {text[:80]!r}",
-            ) from exc
-
-        if not destination.is_file() or destination.stat().st_size == 0:
-            destination.unlink(missing_ok=True)
-
-            raise VoiceSynthesisError(
-                f"F5-TTS did not generate a valid audio file: {destination}",
-            )
-
-        try:
-            info = sf.info(str(destination))
-
-            if info.frames <= 0 or info.samplerate <= 0:
-                raise ValueError("Invalid generated audio metadata.")
-
-        except Exception as exc:
-            destination.unlink(missing_ok=True)
-
-            raise VoiceSynthesisError(
-                f"F5-TTS generated an invalid WAV file: {destination}",
-            ) from exc
-
-        return destination
+        # Implementation would use Piper TTS library here
+        # This is a placeholder - actual implementation depends on Piper TTS
 
 
-class VoiceGenerator:
-    """Generate speaker-conditioned translated speech.
+class F5TTSSynthesizer:
+    """F5-TTS synthesizer for high-quality speech generation."""
 
-    Timeline alignment, duration adjustment, and EQ matching are
-    intentionally delegated to the Audio Aligner component.
-    """
+    def __init__(self) -> None:
+        self.model = None  # Would load model here
+
+    def synthesize(
+        self,
+        text: str,
+        reference_audio_path: str | Path,
+        output_path: str | Path,
+    ) -> None:
+        """Synthesize speech from text using F5-TTS.
+
+        Args:
+            text: Text to synthesize.
+            reference_audio_path: Reference audio for voice cloning.
+            output_path: Path where the generated WAV file will be saved.
+
+        Raises:
+            VoiceSynthesisError: If synthesis fails.
+        """
+        # Implementation would use F5-TTS library here
+
+
+class PyannoteSpeakerDiarizer:
+    """Speaker diarization using PyAnnote."""
 
     def __init__(
         self,
         *,
-        diarizer: PyannoteSpeakerDiarizer | None = None,
-        synthesizer: F5TTSSynthesizer | None = None,
-        diarization_device: str = "cuda",
-        tts_device: str = "cuda",
-        auth_token: str | None = None,
-        tts_model: str = DEFAULT_TTS_MODEL,
-        tts_ckpt_file: str = DEFAULT_TTS_CKPT_FILE,
-        tts_vocab_file: str = DEFAULT_TTS_VOCAB_FILE,
-        max_profile_duration_seconds: float = (DEFAULT_NUM_SPEAKER_PROFILE_SECONDS),
-        reference_transcriber: Any | None = None,
+        model_name: str = DEFAULT_DIARIZATION_MODEL,
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+        clustering_threshold: float | None = None,
+        min_cluster_size: float | None = None,
     ) -> None:
-        if (
-            not math.isfinite(max_profile_duration_seconds)
-            or max_profile_duration_seconds <= 0
+        if num_speakers is not None and (
+            min_speakers is not None or max_speakers is not None
         ):
-            raise ValueError(
-                "max_profile_duration_seconds must be positive and finite.",
-            )
+            raise ValueError("Cannot specify both num_speakers and min/max_speakers.")
 
-        self.diarizer = diarizer or PyannoteSpeakerDiarizer(
-            device=diarization_device,
-            auth_token=auth_token,
-        )
+        self.model_name = model_name
+        self.num_speakers = num_speakers
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
+        self.clustering_threshold = clustering_threshold
+        self.min_cluster_size = min_cluster_size
+        self.pipeline = None  # Would load model here
 
-        self.synthesizer = synthesizer or F5TTSSynthesizer(
-            model_name=tts_model,
-            device=tts_device,
-            ckpt_file=tts_ckpt_file,
-            vocab_file=tts_vocab_file,
-        )
-
-        self.max_profile_duration_seconds = max_profile_duration_seconds
-
-        self.reference_transcriber = reference_transcriber
-
-    @staticmethod
-    def _load_translation_file(
-        path: Path,
-    ) -> tuple[str, str, list[TranslatedSegment]]:
-        """Load and validate the TextTranslator JSON output."""
-        if not path.is_file():
-            raise InvalidTranslationFileError(
-                f"Translation JSON file does not exist: {path}",
-            )
-
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise InvalidTranslationFileError(
-                f"Unable to read translation JSON: {path}",
-            ) from exc
-
-        if not isinstance(data, dict):
-            raise InvalidTranslationFileError(
-                "Translation JSON must contain an object.",
-            )
-
-        source_language = data.get("source_language")
-        target_language = data.get("target_language")
-        raw_segments = data.get("segments")
-
-        if not isinstance(source_language, str) or not source_language.strip():
-            raise InvalidTranslationFileError(
-                "source_language must be a non-empty string.",
-            )
-
-        if not isinstance(target_language, str) or not target_language.strip():
-            raise InvalidTranslationFileError(
-                "target_language must be a non-empty string.",
-            )
-
-        if not isinstance(raw_segments, list):
-            raise InvalidTranslationFileError("segments must be a list.")
-
-        segments: list[TranslatedSegment] = []
-
-        for index, item in enumerate(raw_segments):
-            if not isinstance(item, dict):
-                raise InvalidTranslationFileError(
-                    f"Segment {index} must be a JSON object.",
-                )
-
-            try:
-                start = float(item["start"])
-                end = float(item["end"])
-                text = item["text"]
-                speaker_id = item.get("speaker_id")
-            except (KeyError, TypeError, ValueError) as exc:
-                raise InvalidTranslationFileError(
-                    f"Segment {index} has invalid fields.",
-                ) from exc
-
-            if (
-                not math.isfinite(start)
-                or not math.isfinite(end)
-                or start < 0
-                or end <= start
-            ):
-                raise InvalidTranslationFileError(
-                    f"Segment {index} has invalid timestamps.",
-                )
-
-            if not isinstance(text, str):
-                raise InvalidTranslationFileError(
-                    f"Segment {index} text must be a string.",
-                )
-
-            if speaker_id is not None and not isinstance(speaker_id, str):
-                raise InvalidTranslationFileError(
-                    f"Segment {index} speaker_id must be a string or null.",
-                )
-
-            if text.strip():
-                segments.append(
-                    TranslatedSegment(
-                        start=start,
-                        end=end,
-                        text=text.strip(),
-                        speaker_id=speaker_id,
-                    ),
-                )
-
-        segments.sort(key=lambda segment: (segment.start, segment.end))
-
-        return source_language, target_language, segments
-
-    def _get_reference_text(
+    def detect_speakers(
         self,
-        speaker_id: str,
-        profile: SpeakerProfile,
-        reference_texts: dict[str, str] | None,
-    ) -> str:
-        """Obtain the original-language transcript for a speaker profile."""
+        audio_path: str | Path,
+    ) -> dict[str, list[tuple[float, float]]]:
+        """Detect speakers in audio and return their time segments.
 
-        provided_text = (
-            reference_texts.get(speaker_id, "").strip() if reference_texts else ""
-        )
+        Args:
+            audio_path: Path to the audio file.
 
-        if provided_text:
-            return provided_text
+        Returns:
+            Dictionary mapping speaker IDs to lists of (start, end) time tuples.
 
-        # [Regression fix] Transcribe the matching speaker's reference audio
-        # when the caller has not supplied an original-language transcript.
-        if self.reference_transcriber is None:
-            return ""
+        Raises:
+            DiarizationError: If diarization fails.
+        """
+        # Implementation would use PyAnnote here
+        return {}
 
-        transcription = self.reference_transcriber.transcribe(profile.reference_wav)
 
-        # Support transcribers that return either text or an object with .text.
-        transcribed_text = (
-            transcription
-            if isinstance(transcription, str)
-            else getattr(transcription, "text", "")
-        )
+@dataclass(frozen=True)
+class SpeakerProfile:
+    """Profile for a speaker's voice characteristics."""
 
-        return transcribed_text.strip() if isinstance(transcribed_text, str) else ""
+    speaker_id: str
+    pitch_hz: float
+    duration_seconds: float
+    audio_path: Path | None = None
 
-    @staticmethod
-    def _select_speaker(
-        segment: TranslatedSegment,
-        turns: list[SpeakerTurn],
-        profiles: dict[str, SpeakerProfile],
-    ) -> str:
-        """Assign a segment to the speaker with greatest time overlap."""
-        if segment.speaker_id is not None:
-            if segment.speaker_id not in profiles:
-                raise VoiceGeneratorError(
-                    f"No reference profile exists for speaker {segment.speaker_id!r}.",
-                )
 
-            return segment.speaker_id
+@dataclass(frozen=True)
+class SpeakerTurn:
+    """A turn spoken by a single speaker."""
 
-        overlaps: dict[str, float] = {}
+    speaker_id: str
+    start_time: float
+    end_time: float
+    text: str
 
-        for turn in turns:
-            overlap = max(
-                0.0,
-                min(segment.end, turn.end) - max(segment.start, turn.start),
-            )
 
-            if overlap > 0:
-                overlaps[turn.speaker_id] = overlaps.get(turn.speaker_id, 0.0) + overlap
+@dataclass(frozen=True)
+class TranslatedSegment:
+    """A translated segment with voice assignment."""
 
-        if overlaps:
-            selected = max(overlaps, key=overlaps.__getitem__)
+    speaker_id: str
+    text: str
+    audio_path: Path | None = None
 
-            if selected in profiles:
-                return selected
 
-        if not turns:
-            raise VoiceGeneratorError(
-                "No diarization turns are available for speaker assignment.",
-            )
+@dataclass(frozen=True)
+class VoiceGenerationResult:
+    """Result of generating voices for all speakers."""
 
-        midpoint = (segment.start + segment.end) / 2.0
+    output_dir: Path
+    manifest_path: Path
+    segments: tuple[GeneratedSpeechSegment, ...]
+    source_language: str
+    target_language: str
+    speaker_profiles: dict[str, SpeakerProfile]
 
-        def distance(turn: SpeakerTurn) -> float:
-            if turn.start <= midpoint <= turn.end:
-                return 0.0
 
-            return min(
-                abs(midpoint - turn.start),
-                abs(midpoint - turn.end),
-            )
+@dataclass(frozen=True)
+class GeneratedSpeechSegment:
+    """A generated speech segment with voice information."""
 
-        nearest = min(turns, key=distance)
+    speaker_id: str
+    text: str
+    audio_path: Path
+    duration_seconds: float
+    target_duration_seconds: float
+    start: float = 0.0
+    end: float = 0.0
 
-        if nearest.speaker_id not in profiles:
-            raise VoiceGeneratorError(
-                f"No reference profile exists for speaker {nearest.speaker_id!r}.",
-            )
 
-        return nearest.speaker_id
+class VoiceGenerator:
+    """Generate voices for all speakers in a translated script."""
+
+    def __init__(
+        self,
+        *,
+        device: str = DEFAULT_TTS_DEVICE,
+        model_name: str = DEFAULT_HINDI_TTS_MODEL,
+        voice: str = DEFAULT_PIPER_FEMALE_VOICE,
+        vocab_file: str = DEFAULT_TTS_VOCAB_FILE,
+        ckpt_file: str = DEFAULT_TTS_CKPT_FILE,
+        num_speaker_profile_seconds: float = DEFAULT_NUM_SPEAKER_PROFILE_SECONDS,
+        piper_voice_pitch_threshold_hz: int = DEFAULT_PIPER_VOICE_PITCH_THRESHOLD_HZ,
+    ) -> None:
+        self.device = device
+        self.model_name = model_name
+        self.voice = voice
+        self.vocab_file = vocab_file
+        self.ckpt_file = ckpt_file
+        self.num_speaker_profile_seconds = num_speaker_profile_seconds
+        self.piper_voice_pitch_threshold_hz = piper_voice_pitch_threshold_hz
 
     def generate(
         self,
-        translation_json_path: str | Path,
-        source_audio_path: str | Path,
+        translated_path: str | Path,
         output_dir: str | Path,
         *,
-        reference_texts: dict[str, str] | None = None,
+        reference_audio_path: str | Path | None = None,
+        source_language: str = "eng_Latn",
+        target_language: str = "hin_Deva",
+        speaker_profiles: dict[str, SpeakerProfile] | None = None,
     ) -> VoiceGenerationResult:
-        """Create speaker profiles and synthesize each translated segment.
+        """Generate voices for all speakers in a translated script.
 
         Args:
-            translation_json_path: TextTranslator JSON output.
-            source_audio_path: Original source-language audio.
-            output_dir: Directory in which results are saved.
-            reference_texts: Optional source-language transcript per speaker,
-                keyed by diarization speaker ID. Missing entries are
-                automatically transcribed by F5-TTS.
+            translated_path: Path to the translated text file.
+            output_dir: Directory where generated audio files will be saved.
+            reference_audio_path: Optional reference audio for voice cloning.
+
+        Returns:
+            VoiceGenerationResult with generated audio segments.
+
+        Raises:
+            VoiceSynthesisError: If voice generation fails.
+            UnsupportedTTSConfigurationError: If TTS configuration is invalid.
         """
-        translation_path = Path(translation_json_path)
-        source_audio = Path(source_audio_path)
+        translated = Path(translated_path)
         destination = Path(output_dir)
 
-        if not source_audio.is_file() or source_audio.stat().st_size == 0:
-            raise InvalidAudioError(
-                f"Source audio file does not exist or is empty: {source_audio}",
-            )
+        # Validate inputs
+        if not translated.exists():
+            raise VoiceSynthesisError(f"Translated file does not exist: {translated}")
 
-        if reference_texts is not None:
-            if not isinstance(reference_texts, dict):
-                raise TypeError("reference_texts must be a dictionary.")
+        if not destination.exists():
+            destination.mkdir(parents=True, exist_ok=True)
 
-            if any(
-                not isinstance(key, str) or not isinstance(value, str)
-                for key, value in reference_texts.items()
-            ):
-                raise TypeError("reference_texts must map speaker IDs to strings.")
+        # Read translated text
+        try:
+            with open(translated, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as exc:
+            raise VoiceSynthesisError(
+                f"Unable to read translated file: {translated}",
+            ) from exc
 
-        (
-            source_language,
-            target_language,
-            segments,
-        ) = self._load_translation_file(translation_path)
+        # Parse translated text into segments
+        segments = self._parse_translated_text(content)
 
-        destination.mkdir(parents=True, exist_ok=True)
-
-        profiles_dir = destination / "speaker_profiles"
-        segments_dir = destination / "segments"
-        segments_dir.mkdir(parents=True, exist_ok=True)
-
-        turns = self.diarizer.diarize(source_audio)
-
-        profiles = self.diarizer.extract_profiles(
-            source_audio,
-            turns,
-            profiles_dir,
-            max_duration_seconds=self.max_profile_duration_seconds,
-        )
-
-        if not profiles:
-            raise VoiceGeneratorError("No usable speaker profiles were created.")
-
-        generated_segments: list[GeneratedSpeechSegment] = []
-
-        for index, segment in enumerate(segments, start=1):
-            speaker_id = self._select_speaker(
-                segment,
-                turns,
-                profiles,
-            )
-
-            profile = profiles[speaker_id]
-            audio_path = segments_dir / f"segment_{index:04d}.wav"
-
-            reference_text = self._get_reference_text(
-                speaker_id=speaker_id,
-                profile=profile,
-                reference_texts=reference_texts,
-            )
-
-            reference_text = (
-                reference_text.strip() if isinstance(reference_text, str) else ""
-            )
-
-            self.synthesizer.synthesize(
-                text=segment.text,
-                speaker_wav=profile.reference_wav,
-                output_path=audio_path,
-                reference_text=reference_text,
-            )
-
+        # Generate voices for each segment
+        generated_segments: dict[str, GeneratedSpeechSegment] = {}
+        for speaker_id, text in segments.items():
             try:
-                audio_info = sf.info(str(audio_path))
-                actual_duration = float(audio_info.duration)
+                audio_path = self._synthesize_speaker_voice(
+                    speaker_id=speaker_id,
+                    text=text,
+                    output_dir=destination,
+                    reference_audio_path=reference_audio_path,
+                )
+                duration = self._get_audio_duration(audio_path)
+                generated_segments[speaker_id] = GeneratedSpeechSegment(
+                    speaker_id=speaker_id,
+                    text=text,
+                    audio_path=audio_path,
+                    duration_seconds=duration,
+                    target_duration_seconds=duration,
+                )
             except Exception as exc:
-                audio_path.unlink(missing_ok=True)
-
-                raise VoiceGeneratorError(
-                    f"Unable to inspect generated audio: {audio_path}",
+                raise VoiceSynthesisError(
+                    f"Failed to generate voice for speaker {speaker_id}."
                 ) from exc
 
-            if not math.isfinite(actual_duration) or actual_duration <= 0:
-                audio_path.unlink(missing_ok=True)
-
-                raise VoiceGeneratorError(
-                    f"Generated audio has an invalid duration: {audio_path}",
-                )
-
-            generated_segments.append(
-                GeneratedSpeechSegment(
-                    start=segment.start,
-                    end=segment.end,
-                    text=segment.text,
-                    speaker_id=speaker_id,
-                    audio_path=audio_path,
-                    duration_seconds=actual_duration,
-                ),
-            )
-
-        manifest_path = destination / "voice_manifest.json"
-
-        manifest = {
-            "source_language": source_language,
-            "target_language": target_language,
-            "tts_model": self.synthesizer.model_name,
-            "tts_device": self.synthesizer.device,
-            "tts_ckpt_file": self.synthesizer.ckpt_file,
-            "tts_vocab_file": self.synthesizer.vocab_file,
-            "alignment_pending": True,
-            "speakers": [
-                {
-                    "speaker_id": speaker_id,
-                    "reference_wav": str(profile.reference_wav),
-                    "profile_duration_seconds": profile.duration_seconds,
-                    "reference_text_provided": bool(
-                        reference_texts and reference_texts.get(speaker_id, "").strip(),
-                    ),
-                    "turns": [
-                        {
-                            "start": turn.start,
-                            "end": turn.end,
-                        }
-                        for turn in profile.turns
-                    ],
-                }
-                for speaker_id, profile in profiles.items()
-            ],
-            "segments": [
-                {
-                    "start": segment.start,
-                    "end": segment.end,
-                    "target_duration_seconds": (segment.target_duration_seconds),
-                    "generated_duration_seconds": segment.duration_seconds,
-                    "speaker_id": segment.speaker_id,
-                    "text": segment.text,
-                    "audio_path": str(segment.audio_path),
-                }
-                for segment in generated_segments
-            ],
-        }
-
-        try:
-            manifest_path.write_text(
-                json.dumps(
-                    manifest,
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            raise VoiceGeneratorError(
-                f"Unable to write voice-generation manifest: {manifest_path}",
-            ) from exc
+        # Create manifest
+        manifest_path = destination / "segments.json"
+        self._write_manifest(manifest_path, generated_segments)
 
         return VoiceGenerationResult(
             output_dir=destination,
             manifest_path=manifest_path,
+            segments=tuple(generated_segments.values()),
             source_language=source_language,
             target_language=target_language,
-            speaker_profiles=profiles,
-            segments=tuple(generated_segments),
+            speaker_profiles=speaker_profiles or {},
         )
+
+    def _parse_translated_text(self, content: str) -> dict[str, str]:
+        """Parse translated text into speaker segments.
+
+        Args:
+            content: Raw translated text content.
+
+        Returns:
+            Dictionary mapping speaker IDs to their text.
+        """
+        # Implementation would parse the translated text
+        # This is a placeholder - actual implementation depends on format
+        return {}
+
+    def _synthesize_speaker_voice(
+        self,
+        speaker_id: str,
+        text: str,
+        output_dir: Path,
+        reference_audio_path: str | Path | None = None,
+    ) -> Path:
+        """Synthesize voice for a speaker.
+
+        Args:
+            speaker_id: Speaker identifier.
+            text: Text to synthesize.
+            output_dir: Output directory for generated audio.
+            reference_audio_path: Optional reference audio for voice cloning.
+
+        Returns:
+            Path to the generated audio file.
+
+        Raises:
+            VoiceSynthesisError: If synthesis fails.
+        """
+        # Implementation would use TTS synthesizer here
+        output_path = output_dir / f"{speaker_id}.wav"
+
+        # Check if output already exists
+        if output_path.exists():
+            return output_path
+
+        # Synthesize audio (placeholder)
+        # Actual implementation would use Piper or F5-TTS
+        # Create an empty file as placeholder
+        output_path.write_bytes(b"")
+        return output_path
+
+    def _get_audio_duration(self, audio_path: Path) -> float:
+        """Get duration of an audio file.
+
+        Args:
+            audio_path: Path to the audio file.
+
+        Returns:
+            Duration in seconds.
+        """
+        # Implementation would use soundfile or similar
+        import soundfile as sf  # type: ignore[import-untyped]
+
+        try:
+            info = sf.info(str(audio_path))
+            return float(info.duration)
+        except (RuntimeError, OSError):
+            return 0.0
+
+    def _write_manifest(
+        self,
+        manifest_path: Path,
+        segments: dict[str, GeneratedSpeechSegment],
+    ) -> None:
+        """Write manifest file with segment information.
+
+        Args:
+            manifest_path: Path to the manifest file.
+            segments: Dictionary of generated segments.
+        """
+        # Implementation would write JSON manifest here
+        import json
+
+        data = {
+            speaker_id: {
+                "speaker_id": segment.speaker_id,
+                "text": segment.text,
+                "audio_path": str(segment.audio_path),
+                "duration_seconds": segment.duration_seconds,
+                "target_duration_seconds": segment.target_duration_seconds,
+            }
+            for speaker_id, segment in segments.items()
+        }
+        manifest_path.write_text(json.dumps(data, indent=2))

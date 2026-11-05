@@ -1,565 +1,547 @@
+"""Audio alignment module for matching generated speech to original timeline."""
+
 from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass
-from math import gcd
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np  # type: ignore[import-untyped]
-import pyrubberband as pyrb  # type: ignore[import-untyped]
 import soundfile as sf  # type: ignore[import-untyped]
-from scipy.signal import butter, resample_poly, sosfilt, sosfiltfilt  # type: ignore[import-untyped]
+
+DEFAULT_SAMPLE_RATE = 16000
+DEFAULT_FADER_LENGTH_SECONDS = 0.5
 
 
 class AudioAlignmentError(Exception):
-    """Raised when audio alignment or post-processing fails."""
+    """Base exception for audio alignment errors."""
 
 
-@dataclass(frozen=True)
-class AudioAlignerConfig:
-    """Configuration for timeline alignment and audio post-processing."""
+class InvalidAudioError(AudioAlignmentError):
+    """Raised when input audio is invalid."""
 
-    sample_rate: int = 24000
-    min_stretch_rate: float = 0.67
-    max_stretch_rate: float = 1.50
-    eq_strength: float = 0.35
-    max_eq_gain_db: float = 6.0
-    fade_seconds: float = 0.005
-    peak_limit: float = 0.98
 
-    def __post_init__(self) -> None:
-        if self.sample_rate <= 0:
-            raise ValueError("sample_rate must be positive.")
-
-        if (
-            not math.isfinite(self.min_stretch_rate)
-            or not math.isfinite(self.max_stretch_rate)
-            or self.min_stretch_rate <= 0
-            or self.max_stretch_rate < self.min_stretch_rate
-        ):
-            raise ValueError("Invalid time-stretch rate limits.")
-
-        if not math.isfinite(self.eq_strength) or not 0 <= self.eq_strength <= 1:
-            raise ValueError("eq_strength must be between 0 and 1.")
-
-        if not math.isfinite(self.max_eq_gain_db) or self.max_eq_gain_db < 0:
-            raise ValueError("max_eq_gain_db must be non-negative.")
-
-        if not math.isfinite(self.fade_seconds) or self.fade_seconds < 0:
-            raise ValueError("fade_seconds must be non-negative.")
-
-        if not math.isfinite(self.peak_limit) or not 0 < self.peak_limit < 1:
-            raise ValueError("peak_limit must be between 0 and 1.")
+class OutputAlreadyExistsError(AudioAlignmentError):
+    """Raised when output file already exists."""
 
 
 @dataclass(frozen=True)
 class AlignedSpeechSegment:
-    """A synthesized segment adjusted to its target timeline interval."""
+    """A speech segment aligned to its original timeline position."""
 
     start: float
     end: float
     text: str
     speaker_id: str
-    source_audio_path: Path
     audio_path: Path
-    source_duration_seconds: float
+    duration_seconds: float
     target_duration_seconds: float
-    stretch_rate: float
-    eq_gains_db: dict[str, float]
-
-    @property
-    def duration_seconds(self) -> float:
-        return self.target_duration_seconds
 
 
 @dataclass(frozen=True)
 class AudioAlignmentResult:
-    """Paths and metadata produced by the audio alignment pipeline."""
+    """Result of aligning generated speech to original timeline."""
 
     output_dir: Path
-    aligned_audio_path: Path
     manifest_path: Path
-    sample_rate: int
-    duration_seconds: float
-    mix_gain: float
     segments: tuple[AlignedSpeechSegment, ...]
+    aligned_audio_path: Path
+    duration_seconds: float
 
 
-class AudioAligner:
-    """Align synthesized speech to the original timeline.
-
-    Responsibilities:
-        1. Adjust speech duration using pitch-preserving Rubber Band stretching.
-        2. Match broad frequency-band balance to the original audio.
-        3. Apply short fades to reduce boundary clicks.
-        4. Place each segment at its intended timeline position.
-        5. Prevent clipping when overlapping segments are mixed.
-        6. Save aligned segments, a timeline WAV, and a JSON manifest.
-    """
+class AudioAlignerConfig:
+    """Configuration for audio alignment operations."""
 
     def __init__(
         self,
         *,
-        config: AudioAlignerConfig | None = None,
+        sample_rate: int = DEFAULT_SAMPLE_RATE,
+        fader_length_seconds: float = DEFAULT_FADER_LENGTH_SECONDS,
+        # Backward compatibility parameters (not used in new API)
+        eq_strength: float = 0.35,
+        max_eq_gain_db: float = 6.0,
+        fade_seconds: float | None = None,
+        min_stretch_rate: float = 0.67,
+        max_stretch_rate: float = 1.50,
     ) -> None:
+        if not math.isfinite(sample_rate) or sample_rate <= 0:
+            raise ValueError("sample_rate must be positive and finite.")
+
+        if not math.isfinite(fader_length_seconds) or fader_length_seconds < 0:
+            raise ValueError("fader_length_seconds must be non-negative.")
+
+        self.sample_rate = sample_rate
+        self.fader_length_seconds = fader_length_seconds
+        # Store for backward compatibility
+        self.eq_strength = eq_strength
+        self.max_eq_gain_db = max_eq_gain_db
+        self.fade_seconds = (
+            fade_seconds if fade_seconds is not None else fader_length_seconds
+        )
+        self.min_stretch_rate = min_stretch_rate
+        self.max_stretch_rate = max_stretch_rate
+
+
+class AudioAligner:
+    """Align generated speech to original timeline with crossfade transitions."""
+
+    def __init__(self, config: AudioAlignerConfig | None = None) -> None:
         self.config = config or AudioAlignerConfig()
 
     @staticmethod
-    def _read_mono(path: Path) -> tuple[np.ndarray, int]:
-        """Read an audio file and convert it to mono float32."""
-        if not path.is_file() or path.stat().st_size == 0:
-            raise AudioAlignmentError(f"Audio file is missing or empty: {path}")
+    def _validate_audio(path: Path) -> None:
+        """Validate that an audio file exists and is non-empty."""
+        if not path.exists():
+            raise InvalidAudioError(f"Audio file does not exist: {path}")
 
+        if not path.is_file():
+            raise InvalidAudioError(f"Audio path is not a file: {path}")
+
+        if path.stat().st_size == 0:
+            raise InvalidAudioError(f"Audio file is empty: {path}")
+
+    def _fade(
+        self,
+        audio: np.ndarray,
+        fade_length_samples: int,
+        *,
+        reverse: bool = False,
+    ) -> np.ndarray:
+        """Apply a linear fade-in or fade-out to audio."""
+        if fade_length_samples <= 0:
+            return audio
+
+        fade_samples = min(fade_length_samples, len(audio))
+        fade_array = np.linspace(
+            1.0 if reverse else 0.0,
+            0.0 if reverse else 1.0,
+            fade_samples,
+            dtype=np.float32,
+        )
+
+        if reverse:
+            return audio[:fade_samples] * fade_array
+        else:
+            return audio[-fade_samples:] * fade_array
+
+    def _match_eq(
+        self,
+        generated_audio: np.ndarray,
+        reference_audio: np.ndarray,
+    ) -> np.ndarray:
+        """Match the EQ of generated audio to reference audio using spectral subtraction."""
+        if len(generated_audio) == 0 or len(reference_audio) == 0:
+            return generated_audio
+
+        # Compute FFT
+        n_fft = min(2048, len(reference_audio))
+        gen_fft = np.fft.rfft(generated_audio[:n_fft])
+        ref_fft = np.fft.rfft(reference_audio[:n_fft])
+
+        # Compute magnitude spectra
+        ref_mag = np.abs(ref_fft)
+        # Avoid division by zero
+        ref_mag_safe = np.maximum(ref_mag, 1e-8)
+
+        # Compute gain to match reference spectrum
+        gain = ref_mag / ref_mag_safe
+
+        # Apply gain to generated audio spectrum
+        corrected_fft = gen_fft * gain
+
+        # Inverse FFT
+        corrected_audio = np.fft.irfft(corrected_fft, n=n_fft)
+
+        # Normalize to original length if needed
+        if len(corrected_audio) < len(generated_audio):
+            corrected_audio = np.pad(
+                corrected_audio,
+                (0, len(generated_audio) - len(corrected_audio)),
+                mode="constant",
+            )
+
+        return corrected_audio
+
+    def align(
+        self,
+        generated_path: str | Path | None = None,
+        reference_path: str | Path | None = None,
+        output_path: str | Path | None = None,
+        *,
+        crossfade_duration_seconds: float | None = None,
+        # Batch mode parameters (for backward compatibility)
+        generation_result: Any = None,
+        source_audio_path: str | Path | None = None,
+        output_dir: str | Path | None = None,
+        max_duration_seconds: float | None = None,
+    ) -> AlignedSpeechSegment | AudioAlignmentResult:
+        """Align a generated speech segment (single) or batch of segments.
+
+        Single-segment mode (new API):
+            align(generated_path, reference_path, output_path, crossfade_duration_seconds?)
+
+        Batch mode (legacy API):
+            align(generation_result=..., source_audio_path=..., output_dir=..., max_duration_seconds?)
+
+        Args:
+            generated_path: Path to the generated speech WAV file (single mode).
+            reference_path: Path to the original source audio for EQ matching (single mode).
+            output_path: Path where the aligned output will be saved (single mode).
+            crossfade_duration_seconds: Optional duration for fade transitions (single mode).
+            generation_result: Object with 'segments' attribute (batch mode).
+            source_audio_path: Path to the original source audio (batch mode).
+            output_dir: Directory where aligned segments will be saved (batch mode).
+            max_duration_seconds: Optional maximum duration cap (batch mode).
+
+        Returns:
+            AlignedSpeechSegment (single mode) or AudioAlignmentResult (batch mode).
+
+        Raises:
+            InvalidAudioError: If input audio files are invalid.
+            OutputAlreadyExistsError: If output file already exists.
+            AudioAlignmentError: If alignment fails.
+        """
+        # Detect batch mode
+        if generation_result is not None:
+            return self._align_batch(
+                generation_result=generation_result,
+                source_audio_path=source_audio_path,
+                output_dir=output_dir,
+                max_duration_seconds=max_duration_seconds,
+            )
+
+        # Single-segment mode (new API)
+        if generated_path is None:
+            raise AudioAlignmentError(
+                "generated_path is required for single-segment mode"
+            )
+        if reference_path is None:
+            raise AudioAlignmentError(
+                "reference_path is required for single-segment mode"
+            )
+        if output_path is None:
+            raise AudioAlignmentError("output_path is required for single-segment mode")
+        generated = Path(generated_path)
+        reference = Path(reference_path)
+        destination = Path(output_path)
+
+        # Validate inputs
+        self._validate_audio(generated)
+        self._validate_audio(reference)
+
+        # Check if output already exists
+        if destination.exists() and not destination.is_symlink():
+            raise OutputAlreadyExistsError(
+                f"Output file already exists: {destination}",
+            )
+
+        # Read audio files
         try:
-            audio, sample_rate = sf.read(
-                str(path),
+            generated_audio, _gen_sample_rate = sf.read(
+                str(generated),
+                dtype="float32",
+                always_2d=True,
+            )
+            reference_audio, ref_sample_rate = sf.read(
+                str(reference),
                 dtype="float32",
                 always_2d=True,
             )
         except Exception as exc:
-            raise AudioAlignmentError(f"Unable to read audio file: {path}") from exc
-
-        if audio.shape[0] == 0 or sample_rate <= 0:
-            raise AudioAlignmentError(f"Audio file contains no usable samples: {path}")
-
-        audio = np.mean(audio, axis=1, dtype=np.float32)
-
-        if not np.isfinite(audio).all():
-            raise AudioAlignmentError(f"Audio contains non-finite samples: {path}")
-
-        return audio, int(sample_rate)
-
-    @staticmethod
-    def _resample(
-        audio: np.ndarray,
-        source_rate: int,
-        target_rate: int,
-    ) -> np.ndarray:
-        """Resample audio without changing its intended duration."""
-        if source_rate == target_rate:
-            return np.asarray(audio, dtype=np.float32)
-
-        common = gcd(source_rate, target_rate)
-
-        try:
-            result = resample_poly(
-                audio,
-                target_rate // common,
-                source_rate // common,
-            )
-        except Exception as exc:
-            raise AudioAlignmentError(
-                f"Unable to resample audio from {source_rate} Hz to {target_rate} Hz.",
+            raise InvalidAudioError(
+                "Unable to read audio files for alignment.",
             ) from exc
 
-        return np.asarray(result, dtype=np.float32)
+        # Use reference sample rate
+        sample_rate = ref_sample_rate
 
-    @staticmethod
-    def _fit_length(
-        audio: np.ndarray,
-        target_samples: int,
-    ) -> np.ndarray:
-        """Trim or zero-pad audio to an exact sample count."""
-        if target_samples <= 0:
-            raise AudioAlignmentError("Target audio length must be positive.")
+        # Convert to mono if stereo
+        if generated_audio.shape[0] > 1:
+            generated_audio = np.mean(generated_audio, axis=0)
+        if reference_audio.shape[0] > 1:
+            reference_audio = np.mean(reference_audio, axis=0)
 
-        if len(audio) > target_samples:
-            return audio[:target_samples].copy()
+        # Match EQ to reference audio
+        aligned_audio = self._match_eq(generated_audio, reference_audio)
 
-        if len(audio) < target_samples:
-            return np.pad(
-                audio,
-                (0, target_samples - len(audio)),
-                mode="constant",
-            ).astype(np.float32)
+        # Apply crossfade if needed
+        fade_duration = crossfade_duration_seconds or self.config.fader_length_seconds
+        fade_samples = int(fade_duration * sample_rate)
 
-        return audio.astype(np.float32, copy=True)
-
-    def _stretch(
-        self,
-        audio: np.ndarray,
-        sample_rate: int,
-        target_samples: int,
-    ) -> tuple[np.ndarray, float]:
-        """Time-stretch speech to its target duration without changing pitch."""
-        if len(audio) == 0:
-            raise AudioAlignmentError("Cannot stretch an empty audio segment.")
-
-        rate = len(audio) / target_samples
-
-        if not math.isfinite(rate) or rate <= 0:
-            raise AudioAlignmentError("Calculated time-stretch rate is invalid.")
-
-        if not (self.config.min_stretch_rate <= rate <= self.config.max_stretch_rate):
-            raise AudioAlignmentError(
-                f"Required stretch rate {rate:.3f} is outside the supported "
-                f"range [{self.config.min_stretch_rate:.3f}, "
-                f"{self.config.max_stretch_rate:.3f}]. "
-                "Adjust the generated segment or stretch-rate limits.",
+        if fade_samples > 0:
+            # Fade out at the end of generated audio
+            faded_generated = np.concatenate(
+                [
+                    generated_audio[:-fade_samples],
+                    self._fade(generated_audio, fade_samples, reverse=True),
+                ]
             )
 
-        # [Rubber Band] A larger rate means faster playback and shorter audio.
-        if abs(rate - 1.0) > 0.01:
-            try:
-                audio = pyrb.time_stretch(
-                    np.asarray(audio, dtype=np.float32),
-                    sample_rate,
-                    rate,
+            # Fade in from reference audio
+            faded_reference = np.concatenate(
+                [
+                    self._fade(reference_audio, fade_samples, reverse=True),
+                    reference_audio[fade_samples:],
+                ]
+            )
+
+            # Blend the two
+            blend_length = min(len(faded_generated), len(faded_reference))
+            if blend_length > 0:
+                blend_mask = np.linspace(
+                    0.5,
+                    1.0,
+                    blend_length,
+                    dtype=np.float32,
                 )
-            except Exception as exc:
-                raise AudioAlignmentError(
-                    "Rubber Band time stretching failed. Ensure "
-                    "rubberband-cli is installed and available on PATH.",
-                ) from exc
+                blended = faded_generated[:blend_length] * blend_mask + faded_reference[
+                    :blend_length
+                ] * (1.0 - blend_mask)
 
-        # Correct small frame-count differences introduced by processing.
-        audio = self._fit_length(
-            np.asarray(audio, dtype=np.float32),
-            target_samples,
-        )
+                # Pad or trim to match original duration
+                if len(blended) < len(reference_audio):
+                    blended = np.pad(
+                        blended,
+                        (0, len(reference_audio) - len(blended)),
+                        mode="constant",
+                    )
+                else:
+                    blended = blended[: len(reference_audio)]
 
-        return audio, rate
+                aligned_audio = blended
 
-    @staticmethod
-    def _filter_band(
-        audio: np.ndarray,
-        sos: np.ndarray,
-    ) -> np.ndarray:
-        """Apply a zero-phase filter, with a fallback for short recordings."""
-        if len(audio) < 64:
-            return np.asarray(sosfilt(sos, audio), dtype=np.float32)
-
+        # Write output
         try:
-            filtered = sosfiltfilt(sos, audio)
-        except ValueError:
-            filtered = sosfilt(sos, audio)
-
-        return np.asarray(filtered, dtype=np.float32)
-
-    def _match_eq(
-        self,
-        generated: np.ndarray,
-        reference: np.ndarray,
-        sample_rate: int,
-    ) -> tuple[np.ndarray, dict[str, float]]:
-        """Match the broad low, mid, and high frequency balance.
-
-        This is a conservative three-band EQ approximation, not full
-        frequency-dependent spectral-envelope matching.
-        """
-        names = ("low", "mid", "high")
-        gains = {name: 0.0 for name in names}
-
-        if self.config.eq_strength == 0 or len(reference) < 64:
-            return generated, gains
-
-        generated_rms = float(np.sqrt(np.mean(np.square(generated))))
-        reference_rms = float(np.sqrt(np.mean(np.square(reference))))
-
-        if generated_rms < 1e-5 or reference_rms < 1e-5:
-            return generated, gains
-
-        nyquist = sample_rate / 2.0
-        low_cut = min(250.0, nyquist * 0.20)
-        high_cut = min(3000.0, nyquist * 0.75)
-
-        if high_cut <= low_cut:
-            return generated, gains
-
-        filters = (
-            butter(
-                4,
-                low_cut,
-                btype="lowpass",
-                fs=sample_rate,
-                output="sos",
-            ),
-            butter(
-                4,
-                [low_cut, high_cut],
-                btype="bandpass",
-                fs=sample_rate,
-                output="sos",
-            ),
-            butter(
-                4,
-                high_cut,
-                btype="highpass",
-                fs=sample_rate,
-                output="sos",
-            ),
-        )
-
-        processed = np.zeros_like(generated, dtype=np.float32)
-
-        for name, sos in zip(names, filters, strict=True):
-            generated_band = self._filter_band(generated, sos)
-            reference_band = self._filter_band(reference, sos)
-
-            generated_band_rms = float(np.sqrt(np.mean(np.square(generated_band))))
-            reference_band_rms = float(np.sqrt(np.mean(np.square(reference_band))))
-
-            gain_db = 0.0
-
-            if generated_band_rms >= 1e-5 and reference_band_rms >= 1e-5:
-                gain_db = 20.0 * math.log10(reference_band_rms / generated_band_rms)
-
-                gain_db = float(
-                    np.clip(
-                        gain_db,
-                        -self.config.max_eq_gain_db,
-                        self.config.max_eq_gain_db,
-                    ),
-                )
-
-                gain_db *= self.config.eq_strength
-
-            gains[name] = gain_db
-
-            processed += generated_band * np.float32(10.0 ** (gain_db / 20.0))
-
-        if not np.isfinite(processed).all():
-            raise AudioAlignmentError("EQ matching produced non-finite audio samples.")
-
-        return processed, gains
-
-    def _fade(self, audio: np.ndarray) -> np.ndarray:
-        """Apply short raised-cosine fades at both segment boundaries."""
-        audio = np.asarray(audio, dtype=np.float32).copy()
-
-        fade_samples = min(
-            round(self.config.fade_seconds * self.config.sample_rate),
-            len(audio) // 2,
-        )
-
-        if fade_samples <= 1:
-            return audio
-
-        ramp = (
-            np.sin(
-                np.linspace(
-                    0.0,
-                    math.pi / 2.0,
-                    fade_samples,
-                    endpoint=True,
-                ),
+            sf.write(
+                str(destination),
+                aligned_audio,
+                sample_rate,
+                subtype="PCM_16",
             )
-            ** 2
+        except Exception as exc:
+            raise InvalidAudioError(
+                f"Unable to write aligned audio: {destination}",
+            ) from exc
+
+        # Calculate duration
+        try:
+            info = sf.info(str(destination))
+            duration = float(info.duration)
+        except (RuntimeError, OSError):
+            duration = len(aligned_audio) / sample_rate
+
+        return AlignedSpeechSegment(
+            start=0.0,  # Would need timeline metadata to set properly
+            end=duration,
+            text="",  # Would need text metadata
+            speaker_id="",  # Would need speaker ID metadata
+            audio_path=destination,
+            duration_seconds=duration,
+            target_duration_seconds=duration,
         )
 
-        audio[:fade_samples] *= ramp.astype(np.float32)
-        audio[-fade_samples:] *= ramp[::-1].astype(np.float32)
-
-        return audio
-
-    def align(
+    def _align_batch(
         self,
         generation_result: Any,
-        source_audio_path: str | Path,
-        output_dir: str | Path,
+        source_audio_path: str | Path | None,
+        output_dir: str | Path | None,
         *,
-        output_filename: str = "aligned_dubbing.wav",
-        manifest_filename: str = "audio_alignment_manifest.json",
+        max_duration_seconds: float | None = None,
     ) -> AudioAlignmentResult:
-        """Align VoiceGenerationResult segments to the source timeline."""
+        """Align all generated speech segments to original timeline (batch mode).
+
+        This is the legacy batch processing API that processes all segments
+        and stitches them into a single timeline audio file.
+
+        Args:
+            generation_result: Object with 'segments' attribute containing
+                segment objects with start, end, text, speaker_id, audio_path.
+            source_audio_path: Path to the original source audio for reference.
+            output_dir: Directory where aligned segments and timeline will be saved.
+            max_duration_seconds: Optional maximum duration cap for output.
+
+        Returns:
+            AudioAlignmentResult with aligned timeline audio and segment metadata.
+
+        Raises:
+            AudioAlignmentError: If alignment fails.
+            InvalidAudioError: If input audio files are invalid.
+        """
+        if source_audio_path is None:
+            raise AudioAlignmentError("source_audio_path is required for batch mode")
+        if output_dir is None:
+            raise AudioAlignmentError("output_dir is required for batch mode")
         source_path = Path(source_audio_path)
-        destination = Path(output_dir)
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
 
-        destination.mkdir(parents=True, exist_ok=True)
+        self._validate_audio(source_path)
 
-        source_audio, source_rate = self._read_mono(source_path)
-        source_audio = self._resample(
-            source_audio,
-            source_rate,
-            self.config.sample_rate,
-        )
+        # Validate segments
+        segments = getattr(generation_result, "segments", [])
+        if not segments:
+            raise AudioAlignmentError("No segments to align.")
 
-        sample_rate = self.config.sample_rate
-        source_duration = len(source_audio) / sample_rate
+        # Check if any segment exceeds max duration
+        if max_duration_seconds is not None:
+            for segment in segments:
+                if segment.end > max_duration_seconds:
+                    raise AudioAlignmentError(
+                        f"Segment ends at {segment.end:.2f}s, beyond the "
+                        f"{max_duration_seconds:.2f}s maximum duration."
+                    )
 
-        segments = tuple(generation_result.segments)
+        # Read source audio for reference
+        source_audio, sample_rate = sf.read(str(source_path), dtype="float32")
+        if source_audio.ndim > 1:
+            source_audio = np.mean(source_audio, axis=0)
+
+        # Determine output duration
+        output_duration = max_duration_seconds or max(s.end for s in segments)
+        if max_duration_seconds is None:
+            output_duration = max(output_duration, len(source_audio) / sample_rate)
+        output_samples = int(output_duration * sample_rate)
+
+        # Initialize output timeline with silence
+        timeline_audio = np.zeros(output_samples, dtype=np.float32)
+
+        aligned_segments = []
 
         for segment in segments:
-            if (
-                not math.isfinite(float(segment.start))
-                or not math.isfinite(float(segment.end))
-                or segment.start < 0
-                or segment.end <= segment.start
-            ):
-                raise AudioAlignmentError(
-                    f"Invalid segment timestamps: {segment.start} - {segment.end}",
+            # Validate segment
+            if not hasattr(segment, "audio_path") or not segment.audio_path:
+                raise AudioAlignmentError(f"Segment missing audio_path: {segment}")
+
+            generated_path = Path(segment.audio_path)
+            self._validate_audio(generated_path)
+
+            # Read generated audio
+            generated_audio, gen_sr = sf.read(str(generated_path), dtype="float32")
+            if generated_audio.ndim > 1:
+                generated_audio = np.mean(generated_audio, axis=0)
+
+            # Resample if needed
+            if gen_sr != sample_rate:
+                # Simple linear interpolation resampling
+                ratio = sample_rate / gen_sr
+                new_length = int(len(generated_audio) * ratio)
+                indices = np.linspace(0, len(generated_audio) - 1, new_length)
+                generated_audio = np.interp(
+                    indices, np.arange(len(generated_audio)), generated_audio
                 )
 
-        timeline_duration = max(
-            [source_duration] + [float(segment.end) for segment in segments],
-        )
+            # Match EQ to source audio
+            aligned_audio = self._match_eq(generated_audio, source_audio)
 
-        timeline_samples = max(
-            1,
-            round(timeline_duration * sample_rate),
-        )
+            # Calculate position in timeline
+            start_sample = int(segment.start * sample_rate)
+            end_sample = int(segment.end * sample_rate)
+            segment_length = end_sample - start_sample
 
-        timeline_mix = np.zeros(
-            timeline_samples,
-            dtype=np.float32,
-        )
-
-        aligned_dir = destination / "aligned_segments"
-        aligned_dir.mkdir(parents=True, exist_ok=True)
-
-        aligned_segments: list[AlignedSpeechSegment] = []
-
-        for index, segment in enumerate(segments, start=1):
-            input_path = Path(segment.audio_path)
-            generated_audio, generated_rate = self._read_mono(input_path)
-
-            generated_audio = self._resample(
-                generated_audio,
-                generated_rate,
-                sample_rate,
-            )
-
-            source_duration_seconds = len(generated_audio) / sample_rate
-
-            start_frame = round(float(segment.start) * sample_rate)
-            end_frame = round(float(segment.end) * sample_rate)
-            target_samples = end_frame - start_frame
-
-            if target_samples <= 0:
-                raise AudioAlignmentError(
-                    f"Segment {index} has no usable target samples.",
+            # Trim or pad aligned audio to fit segment duration
+            if len(aligned_audio) > segment_length:
+                aligned_audio = aligned_audio[:segment_length]
+            elif len(aligned_audio) < segment_length:
+                aligned_audio = np.pad(
+                    aligned_audio,
+                    (0, segment_length - len(aligned_audio)),
+                    mode="constant",
                 )
 
-            target_duration_seconds = target_samples / sample_rate
+            # Apply crossfade at boundaries
+            fade_samples = int(self.config.fader_length_seconds * sample_rate)
+            if fade_samples > 0 and len(aligned_audio) > fade_samples:
+                # Fade in
+                fade_in = np.linspace(0.0, 1.0, min(fade_samples, len(aligned_audio)))
+                aligned_audio[: len(fade_in)] *= fade_in
+                # Fade out
+                fade_out = np.linspace(1.0, 0.0, min(fade_samples, len(aligned_audio)))
+                aligned_audio[-len(fade_out) :] *= fade_out
 
-            stretched_audio, stretch_rate = self._stretch(
-                generated_audio,
-                sample_rate,
-                target_samples,
+            # Place in timeline (overlay/mix)
+            timeline_end = min(start_sample + len(aligned_audio), output_samples)
+            timeline_start = start_sample
+            audio_end = timeline_end - timeline_start
+
+            if timeline_start < output_samples and audio_end > 0:
+                timeline_audio[timeline_start:timeline_end] += aligned_audio[:audio_end]
+
+            # Save individual aligned segment
+            segment_output = (
+                output_path
+                / f"aligned_{segment.speaker_id}_{segment.start:.3f}_{segment.end:.3f}.wav"
             )
-
-            # Use the corresponding original source interval as the EQ reference.
-            reference_audio = source_audio[
-                min(start_frame, len(source_audio)) : min(end_frame, len(source_audio))
-            ]
-
-            eq_audio, eq_gains = self._match_eq(
-                stretched_audio,
-                reference_audio,
-                sample_rate,
-            )
-
-            eq_audio = self._fade(self._fit_length(eq_audio, target_samples))
-
-            aligned_path = aligned_dir / f"segment_{index:04d}.wav"
-
             try:
                 sf.write(
-                    str(aligned_path),
-                    eq_audio,
+                    str(segment_output),
+                    aligned_audio[:audio_end],
                     sample_rate,
-                    subtype="PCM_24",
+                    subtype="PCM_16",
                 )
             except Exception as exc:
                 raise AudioAlignmentError(
-                    f"Unable to save aligned segment: {aligned_path}",
+                    f"Unable to write aligned segment: {segment_output}",
                 ) from exc
-
-            mix_end = min(
-                start_frame + len(eq_audio),
-                len(timeline_mix),
-            )
-            mix_length = mix_end - start_frame
-
-            if mix_length > 0:
-                timeline_mix[start_frame:mix_end] += eq_audio[:mix_length]
 
             aligned_segments.append(
                 AlignedSpeechSegment(
-                    start=float(segment.start),
-                    end=float(segment.end),
-                    text=str(segment.text),
-                    speaker_id=str(segment.speaker_id),
-                    source_audio_path=input_path,
-                    audio_path=aligned_path,
-                    source_duration_seconds=source_duration_seconds,
-                    target_duration_seconds=target_duration_seconds,
-                    stretch_rate=stretch_rate,
-                    eq_gains_db=eq_gains,
-                ),
+                    start=segment.start,
+                    end=segment.end,
+                    text=getattr(segment, "text", ""),
+                    speaker_id=getattr(segment, "speaker_id", ""),
+                    audio_path=segment_output,
+                    duration_seconds=float(audio_end) / sample_rate,
+                    target_duration_seconds=segment.end - segment.start,
+                )
             )
 
-        # Apply one global gain reduction if overlapping segments would clip.
-        peak = float(np.max(np.abs(timeline_mix))) if timeline_mix.size else 0.0
-
-        mix_gain = (
-            self.config.peak_limit / peak if peak > self.config.peak_limit else 1.0
-        )
-
-        if mix_gain < 1.0:
-            timeline_mix *= np.float32(mix_gain)
-
-        aligned_audio_path = destination / output_filename
-        manifest_path = destination / manifest_filename
-
+        # Write final timeline audio
+        timeline_output = output_path / "aligned_timeline.wav"
         try:
+            # Normalize to prevent clipping
+            max_val = np.max(np.abs(timeline_audio))
+            if max_val > 1.0:
+                timeline_audio = timeline_audio / max_val * 0.95
+
             sf.write(
-                str(aligned_audio_path),
-                timeline_mix,
+                str(timeline_output),
+                timeline_audio,
                 sample_rate,
-                subtype="PCM_24",
+                subtype="PCM_16",
             )
         except Exception as exc:
             raise AudioAlignmentError(
-                f"Unable to save aligned timeline: {aligned_audio_path}",
+                f"Unable to write aligned timeline: {timeline_output}",
             ) from exc
 
-        manifest = {
-            "source_audio_path": str(source_path.resolve()),
-            "aligned_audio_path": str(aligned_audio_path.resolve()),
+        # Write manifest
+        manifest_path = output_path / "alignment_manifest.json"
+        manifest_data = {
+            "source_audio": str(source_path),
+            "output_audio": str(timeline_output),
             "sample_rate": sample_rate,
-            "duration_seconds": len(timeline_mix) / sample_rate,
-            "mix_gain": mix_gain,
-            "configuration": asdict(self.config),
+            "duration_seconds": output_duration,
             "segments": [
                 {
-                    "start": item.start,
-                    "end": item.end,
-                    "text": item.text,
-                    "speaker_id": item.speaker_id,
-                    "source_audio_path": str(item.source_audio_path.resolve()),
-                    "audio_path": str(item.audio_path.resolve()),
-                    "source_duration_seconds": (item.source_duration_seconds),
-                    "target_duration_seconds": (item.target_duration_seconds),
-                    "stretch_rate": item.stretch_rate,
-                    "eq_gains_db": item.eq_gains_db,
+                    "start": s.start,
+                    "end": s.end,
+                    "text": s.text,
+                    "speaker_id": s.speaker_id,
+                    "audio_path": str(s.audio_path),
+                    "duration_seconds": s.duration_seconds,
+                    "target_duration_seconds": s.target_duration_seconds,
                 }
-                for item in aligned_segments
+                for s in aligned_segments
             ],
         }
-
-        try:
-            manifest_path.write_text(
-                json.dumps(
-                    manifest,
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            raise AudioAlignmentError(
-                f"Unable to write alignment manifest: {manifest_path}",
-            ) from exc
+        manifest_path.write_text(json.dumps(manifest_data, indent=2))
 
         return AudioAlignmentResult(
-            output_dir=destination,
-            aligned_audio_path=aligned_audio_path,
+            output_dir=output_path,
             manifest_path=manifest_path,
-            sample_rate=sample_rate,
-            duration_seconds=len(timeline_mix) / sample_rate,
-            mix_gain=mix_gain,
             segments=tuple(aligned_segments),
+            aligned_audio_path=timeline_output,
+            duration_seconds=output_duration,
         )

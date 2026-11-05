@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from faster_whisper import WhisperModel  # type: ignore[import-untyped]
-from faster_whisper.transcribe import TranscriptionSegment  # type: ignore[import-untyped]
+from faster_whisper.transcribe import Segment  # type: ignore[import-untyped]
 
 DEFAULT_MODEL_SIZE = "small"
 DEFAULT_DEVICE = "auto"
@@ -142,7 +142,7 @@ class SpeechRecognizer:
 
     @staticmethod
     def _parse_segment(
-        segment: TranscriptionSegment,
+        segment: Segment,
     ) -> TranscriptSegment:
         """Convert a Faster-Whisper segment into a public data object."""
         try:
