@@ -27,7 +27,7 @@ jobs:
         run: poetry install --no-interaction
 
       - name: Configure TestPyPI token repository
-        run: poetry config repository.testpypi https://test.pypi.org/legacy/
+        run: poetry config repositories.testpypi https://test.pypi.org/legacy/
 
       - name: Build package with Poetry
         run: poetry build
