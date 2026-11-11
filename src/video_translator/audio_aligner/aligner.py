@@ -135,10 +135,19 @@ class AudioAligner:
         if len(generated_audio) == 0 or len(reference_audio) == 0:
             return generated_audio
 
-        # Compute FFT
-        n_fft = min(2048, len(reference_audio))
-        gen_fft = np.fft.rfft(generated_audio[:n_fft])
-        ref_fft = np.fft.rfft(reference_audio[:n_fft])
+        # Use the full length of generated audio for FFT so no samples are lost
+        n_fft = len(generated_audio)
+
+        # Compute FFT on the full generated audio
+        gen_fft = np.fft.rfft(generated_audio)
+
+        # Use reference audio truncated to the same length as generated audio
+        ref_segment = (
+            reference_audio[:n_fft]
+            if len(reference_audio) >= n_fft
+            else np.pad(reference_audio, (0, n_fft - len(reference_audio)))
+        )
+        ref_fft = np.fft.rfft(ref_segment)
 
         # Compute magnitude spectra
         ref_mag = np.abs(ref_fft)
@@ -151,16 +160,18 @@ class AudioAligner:
         # Apply gain to generated audio spectrum
         corrected_fft = gen_fft * gain
 
-        # Inverse FFT
+        # Inverse FFT — full-length output, no truncation
         corrected_audio = np.fft.irfft(corrected_fft, n=n_fft)
 
-        # Normalize to original length if needed
+        # Ensure output length matches generated audio length
         if len(corrected_audio) < len(generated_audio):
             corrected_audio = np.pad(
                 corrected_audio,
                 (0, len(generated_audio) - len(corrected_audio)),
                 mode="constant",
             )
+        elif len(corrected_audio) > len(generated_audio):
+            corrected_audio = corrected_audio[: len(generated_audio)]
 
         return corrected_audio
 
